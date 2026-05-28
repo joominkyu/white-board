@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>화상 화이트보드</title>
+  <link rel="stylesheet" href="style.css?v=3" />
+</head>
+<body>
+
+  <!-- 입장 화면 -->
+  <div id="lobby">
+    <div class="lobby-box">
+      <div class="lobby-icon">🎥</div>
+      <h1>화상 화이트보드</h1>
+      <p class="subtitle">2명이 함께하는 화상통화 + 화이트보드</p>
+      <input id="username-input" type="text" placeholder="닉네임" maxlength="20" />
+      <input id="room-input" type="text" placeholder="방 이름 (같은 방 이름으로 입장)" maxlength="30" />
+      <button id="join-btn">입장하기</button>
+      <p id="lobby-error" class="error-msg"></p>
+    </div>
+  </div>
+
+  <!-- 채팅방 화면 -->
+  <div id="room" class="hidden">
+
+    <!-- 상단 헤더 -->
+    <div class="room-header">
+      <div class="header-left">
+        <span class="room-icon">📋</span>
+        <span id="room-title"></span>
+      </div>
+      <div class="header-right">
+        <span id="connection-status" class="status-badge waiting">대기 중</span>
+        <button id="chat-toggle-btn" class="chat-toggle-btn">💬</button>
+        <button id="copy-link-btn" class="copy-link-btn">🔗 링크 복사</button>
+        <button id="record-btn" class="record-btn">⏺ 녹화</button>
+        <div id="rec-indicator" class="rec-indicator hidden">
+          <span class="rec-dot"></span>
+          <span id="rec-timer">00:00</span>
+        </div>
+        <button id="leave-btn" class="leave-btn">나가기</button>
+      </div>
+    </div>
+
+    <div class="main-layout">
+
+      <!-- 왼쪽: 비디오 + 채팅 패널 -->
+      <div class="video-panel">
+        <div class="video-section">
+          <div class="video-box remote-box">
+            <video id="remote-video" autoplay playsinline></video>
+            <div id="waiting-overlay" class="waiting-overlay">
+              <div class="waiting-icon">👤</div>
+              <p>상대방 대기 중...</p>
+            </div>
+            <span class="video-label" id="remote-label">상대방</span>
+          </div>
+          <div class="video-box local-box">
+            <video id="local-video" autoplay playsinline muted></video>
+            <span class="video-label" id="local-label">나</span>
+          </div>
+        </div>
+        <div class="video-controls">
+          <button id="settings-btn" class="ctrl-btn" title="미디어 설정">
+            <span class="btn-icon">⚙️</span>
+            <span class="btn-label">설정</span>
+          </button>
+        </div>
+        <div class="chat-section">
+          <button id="chat-close-btn" class="chat-mobile-close">✕</button>
+          <div class="chat-title">💬 채팅</div>
+          <div id="chat-messages"></div>
+          <div class="chat-input-row">
+            <input id="chat-input" type="text" placeholder="메시지..." maxlength="300" />
+            <button id="send-btn">전송</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 가운데: 화이트보드 + 웹 -->
+      <div class="board-panel">
+
+        <!-- ① 화이트보드 모드 콘텐츠 -->
+        <div id="wb-content">
+          <div class="toolbar">
+            <div class="tool-group">
+              <div class="shape-wrap">
+                <button id="tool-pen" class="tool-btn active" title="펜">✏️</button>
+                <div id="pen-popup" class="tool-popup hidden">
+                  <button class="pen-opt active" data-mode="free"  title="자유선">〜</button>
+                  <button class="pen-opt"        data-mode="line"  title="직선">╱</button>
+                  <button class="pen-opt"        data-mode="snap"  title="수직/수평선">┼</button>
+                </div>
+              </div>
+              <button id="tool-eraser" class="tool-btn" title="지우개">🧹</button>
+              <div class="shape-wrap">
+                <button id="tool-shape" class="tool-btn" title="도형">🔷</button>
+                <div id="shape-popup" class="tool-popup hidden">
+                  <button class="shape-opt" data-shape="rect"     title="사각형">□</button>
+                  <button class="shape-opt" data-shape="triangle" title="삼각형">△</button>
+                  <button class="shape-opt" data-shape="circle"   title="원">○</button>
+                </div>
+              </div>
+            </div>
+            <div class="tool-group">
+              <label class="tool-label">색상</label>
+              <input id="color-picker" type="color" value="#000000" title="색상 선택" />
+            </div>
+            <div class="tool-group">
+              <label class="tool-label">굵기</label>
+              <input id="size-slider" type="range" min="1" max="40" value="4" title="굵기" />
+              <span id="size-display">4</span>
+            </div>
+            <div class="tool-group">
+              <button id="pdf-btn" class="action-btn" title="PDF 업로드">📄 PDF</button>
+              <input id="pdf-input" type="file" accept=".pdf" class="hidden" />
+            </div>
+            <div class="tool-group pdf-nav hidden" id="pdf-nav">
+              <button id="pdf-prev" class="nav-btn">◀</button>
+              <span id="pdf-page-info">1 / 1</span>
+              <button id="pdf-next" class="nav-btn">▶</button>
+            </div>
+          </div>
+          <div class="canvas-container" id="canvas-container">
+            <div id="canvas-wrapper">
+              <div id="canvas-inner">
+                <canvas id="pdf-canvas"></canvas>
+                <canvas id="draw-canvas"></canvas>
+                <canvas id="preview-canvas"></canvas>
+              </div>
+            </div>
+            <div id="zoom-indicator" class="zoom-indicator hidden">100%</div>
+          </div>
+        </div>
+
+        <!-- ② 웹 모드 콘텐츠 -->
+        <div id="web-content" class="hidden">
+          <div class="web-bar">
+            <button id="web-back" class="web-ctrl-btn" title="뒤로">◀</button>
+            <button id="web-forward" class="web-ctrl-btn" title="앞으로">▶</button>
+            <button id="web-refresh" class="web-ctrl-btn" title="새로고침">↻</button>
+            <input id="web-url" type="text" class="web-url-input" value="https://www.google.com" placeholder="URL 입력..." />
+            <button id="web-go" class="web-go-btn">이동</button>
+            <a id="web-newtab" class="web-ctrl-btn" target="_blank" title="새 탭으로 열기">↗</a>
+          </div>
+          <div class="web-frame-wrap">
+            <iframe id="web-frame"
+              src="about:blank"
+              sandbox="allow-scripts allow-forms allow-popups allow-pointer-lock allow-same-origin"
+              allowfullscreen>
+            </iframe>
+            <div id="web-blocked" class="web-blocked hidden">
+              <p>🚫 이 사이트는 보안 정책으로 인해 임베딩이 차단됩니다.</p>
+              <a id="web-open-link" href="#" target="_blank">새 탭에서 열기 ↗</a>
+            </div>
+          </div>
+        </div>
+
+        <!-- ③ 하단 모드 탭 바 -->
+        <div class="mode-bar">
+          <div class="mode-tabs">
+            <button id="mode-wb"  class="mode-tab active">✏️ 화이트보드</button>
+            <button id="mode-web" class="mode-tab">🌐 웹</button>
+          </div>
+          <button id="clear-all-btn" class="clear-all-btn">🗑️ 전체 지우기</button>
+        </div>
+
+      </div>
+
+      <!-- 오른쪽: PDF 페이지 목록 -->
+      <div class="pages-panel hidden" id="pages-panel">
+        <div class="pages-header">페이지</div>
+        <div class="pages-list" id="pages-list"></div>
+      </div>
+
+    </div>
+
+    <!-- 설정 모달 -->
+    <div id="settings-modal" class="settings-modal hidden">
+      <div class="settings-box">
+        <div class="settings-header">
+          <span>⚙️ 미디어 설정</span>
+          <button id="settings-close" class="settings-close-btn">✕</button>
+        </div>
+        <div class="settings-body">
+          <div class="settings-section">
+            <div class="settings-section-title">📷 카메라</div>
+            <div class="settings-row">
+              <label>장치</label>
+              <select id="cam-select" class="settings-select"></select>
+            </div>
+            <div class="settings-row">
+              <label>상태</label>
+              <button id="settings-cam-toggle" class="settings-toggle on">켜짐</button>
+            </div>
+          </div>
+          <div class="settings-section">
+            <div class="settings-section-title">🎤 마이크</div>
+            <div class="settings-row">
+              <label>장치</label>
+              <select id="mic-select" class="settings-select"></select>
+            </div>
+            <div class="settings-row">
+              <label>상태</label>
+              <button id="settings-mic-toggle" class="settings-toggle on">켜짐</button>
+            </div>
+            <div class="settings-row">
+              <label>음량</label>
+              <input id="mic-volume-slider" type="range" min="0" max="200" value="100" class="settings-range" />
+              <span id="mic-volume-display" class="settings-range-val">100%</span>
+            </div>
+          </div>
+          <div class="settings-section">
+            <div class="settings-section-title">🔊 스피커</div>
+            <div class="settings-row">
+              <label>장치</label>
+              <select id="speaker-select" class="settings-select"></select>
+            </div>
+            <div class="settings-row">
+              <label>음량</label>
+              <input id="speaker-volume-slider" type="range" min="0" max="100" value="100" class="settings-range" />
+              <span id="speaker-volume-display" class="settings-range-val">100%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="client.js?v=3"></script>
+</body>
+</html>
