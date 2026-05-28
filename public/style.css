@@ -923,9 +923,14 @@ body {
   padding: 6px;
   display: flex;
   flex-direction: row;
+  flex-wrap: wrap;
   gap: 4px;
   z-index: 100;
   box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+
+#shape-popup {
+  width: calc(34px * 3 + 4px * 2 + 6px * 2);
 }
 
 .shape-opt, .pen-opt {

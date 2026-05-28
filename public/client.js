@@ -29,6 +29,8 @@ let micVolumeVal = 100, speakerVolumeVal = 100;
 let micAudioCtx = null, micGainNode = null, gainedAudioTrack = null;
 let selectedMicId = '', selectedCamId = '', selectedSpeakerId = '';
 let isDrawing = false;
+let remoteDrawState = { tool: 'pen', color: '#000000', size: 4 };
+let shapeFilled = false;
 let currentTool = 'pen';
 let strokeColor = '#000000';
 let strokeSize = 4;
@@ -270,17 +272,19 @@ function setupSocketEvents() {
 
   // 화이트보드 수신
   socket.on('draw-start', ({ x, y, color, size, tool }) => {
+    remoteDrawState = { tool, color, size };
     setupCtx(drawCtx, tool, color, size);
     drawCtx.beginPath();
     drawCtx.moveTo(x, y);
   });
   socket.on('draw-move', ({ x, y }) => {
+    setupCtx(drawCtx, remoteDrawState.tool, remoteDrawState.color, remoteDrawState.size);
     drawCtx.lineTo(x, y);
     drawCtx.stroke();
   });
   socket.on('draw-end', () => drawCtx.closePath());
-  socket.on('draw-shape', ({ type, x1, y1, x2, y2, color, size }) => {
-    renderShape(drawCtx, type, x1, y1, x2, y2, color, size);
+  socket.on('draw-shape', ({ type, x1, y1, x2, y2, color, size, filled }) => {
+    renderShape(drawCtx, type, x1, y1, x2, y2, color, size, filled);
   });
   socket.on('draw-line', ({ x1, y1, x2, y2, color, size }) => {
     renderLine(drawCtx, x1, y1, x2, y2, color, size);
@@ -684,7 +688,7 @@ drawCanvas.addEventListener('mousemove', e => {
   if (usesPreview()) {
     previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
     if (currentTool === 'shape') {
-      renderShape(previewCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize);
+      renderShape(previewCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize, shapeFilled);
     } else {
       let ex = x, ey = y;
       if (currentPenMode === 'snap') {
@@ -695,6 +699,7 @@ drawCanvas.addEventListener('mousemove', e => {
     }
     return;
   }
+  setupCtx(drawCtx, currentTool, strokeColor, strokeSize);
   drawCtx.lineTo(x, y);
   drawCtx.stroke();
   lastX = x; lastY = y;
@@ -710,10 +715,10 @@ drawCanvas.addEventListener('mousemove', e => {
       if (evt === 'mouseup') {
         const { x, y } = getPos(e);
         if (currentTool === 'shape') {
-          renderShape(drawCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize);
+          renderShape(drawCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize, shapeFilled);
           socket && socket.emit('draw-shape', {
             type: currentShape, x1: shapeStartX, y1: shapeStartY, x2: x, y2: y,
-            color: strokeColor, size: strokeSize
+            color: strokeColor, size: strokeSize, filled: shapeFilled
           });
         } else {
           let ex = x, ey = y;
@@ -852,7 +857,11 @@ const toolShapeBtn = document.getElementById('tool-shape');
 const shapePopup   = document.getElementById('shape-popup');
 const shapeOpts    = document.querySelectorAll('.shape-opt');
 
-const SHAPE_ICONS = { rect: '▭', triangle: '△', circle: '○' };
+const SHAPE_ICONS = {
+  rect:     { outline: '▭', filled: '■' },
+  triangle: { outline: '△', filled: '▲' },
+  circle:   { outline: '○', filled: '●' },
+};
 
 toolShapeBtn.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -864,14 +873,16 @@ shapeOpts.forEach(btn => {
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     currentShape = btn.dataset.shape;
+    shapeFilled  = btn.dataset.filled === 'true';
     currentTool  = 'shape';
     shapePopup.classList.add('hidden');
-    // 활성화 UI
     toolPen.classList.remove('active');
     toolEraser.classList.remove('active');
     toolShapeBtn.classList.add('active');
-    toolShapeBtn.textContent = SHAPE_ICONS[currentShape];
-    shapeOpts.forEach(o => o.classList.toggle('active', o.dataset.shape === currentShape));
+    toolShapeBtn.textContent = SHAPE_ICONS[currentShape][shapeFilled ? 'filled' : 'outline'];
+    shapeOpts.forEach(o => o.classList.toggle('active',
+      o.dataset.shape === currentShape && (o.dataset.filled === 'true') === shapeFilled
+    ));
     drawCanvas.style.cursor = 'crosshair';
   });
 });
@@ -882,12 +893,11 @@ document.addEventListener('click', () => {
   penPopup.classList.add('hidden');
 });
 
-function renderShape(ctx, type, x1, y1, x2, y2, color, size) {
+function renderShape(ctx, type, x1, y1, x2, y2, color, size, filled = false) {
   ctx.globalCompositeOperation = 'source-over';
-  ctx.strokeStyle = color;
-  ctx.lineWidth   = size;
-  ctx.lineCap     = 'round';
-  ctx.lineJoin    = 'round';
+  ctx.lineWidth  = size;
+  ctx.lineCap    = 'round';
+  ctx.lineJoin   = 'round';
   const padX = Math.abs(x2 - x1) * 0.08;
   const padY = Math.abs(y2 - y1) * 0.08;
   const signX = x2 >= x1 ? 1 : -1;
@@ -911,7 +921,13 @@ function renderShape(ctx, type, x1, y1, x2, y2, color, size) {
     ctx.lineTo(x1 + pad * signX, y2);
     ctx.closePath();
   }
-  ctx.stroke();
+  if (filled) {
+    ctx.fillStyle = color;
+    ctx.fill();
+  } else {
+    ctx.strokeStyle = color;
+    ctx.stroke();
+  }
 }
 
 /* ────────── 커서 ────────── */
