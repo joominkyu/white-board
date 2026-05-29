@@ -12,38 +12,42 @@ const io = new Server(server, {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// rooms: { roomId: [{ socketId, username }] }
+// rooms: { roomId: { users: [{ socketId, username }], host: socketId } }
 const rooms = {};
 
 io.on('connection', (socket) => {
   console.log('connected:', socket.id);
 
   socket.on('join-room', ({ roomId, username }) => {
-    if (!rooms[roomId]) rooms[roomId] = [];
+    if (!rooms[roomId]) {
+      rooms[roomId] = { users: [], host: socket.id };
+    }
 
-    if (rooms[roomId].length >= 2) {
+    if (rooms[roomId].users.length >= 2) {
       socket.emit('room-full');
       return;
     }
 
-    rooms[roomId].push({ socketId: socket.id, username });
+    const isHost = rooms[roomId].host === socket.id;
+    rooms[roomId].users.push({ socketId: socket.id, username });
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.username = username;
 
-    const others = rooms[roomId].filter(u => u.socketId !== socket.id);
+    const others = rooms[roomId].users.filter(u => u.socketId !== socket.id);
 
     if (others.length > 0) {
-      // 먼저 있던 사람에게 새 유저가 왔음을 알림 → 먼저 있던 쪽이 offer 보냄
       socket.to(roomId).emit('user-joined', { socketId: socket.id, username });
     }
 
     socket.emit('joined', {
       roomId,
-      users: rooms[roomId],
+      users: rooms[roomId].users,
+      isHost,
+      hostSocketId: rooms[roomId].host
     });
 
-    console.log(`${username} joined room ${roomId}, total: ${rooms[roomId].length}`);
+    console.log(`${username} joined room ${roomId} (host: ${isHost}), total: ${rooms[roomId].users.length}`);
   });
 
   // ── WebRTC 시그널링 ──
@@ -74,7 +78,49 @@ io.on('connection', (socket) => {
   socket.on('draw-end', () => socket.to(socket.data.roomId).emit('draw-end'));
   socket.on('draw-shape', (data) => socket.to(socket.data.roomId).emit('draw-shape', data));
   socket.on('draw-line',  (data) => socket.to(socket.data.roomId).emit('draw-line',  data));
-  socket.on('whiteboard-clear', () => socket.to(socket.data.roomId).emit('whiteboard-clear'));
+
+  // 기기 목록 공유 (비방장 → 방장에게만 전달)
+  socket.on('user-devices', (devices) => {
+    const roomId = socket.data.roomId;
+    if (!roomId || !rooms[roomId]) return;
+    const hostId = rooms[roomId].host;
+    if (hostId !== socket.id) {
+      io.to(hostId).emit('remote-devices', devices);
+    }
+  });
+
+  // 기기 목록 요청 (방장 → 상대방에게 요청)
+  socket.on('request-user-devices', () => {
+    const roomId = socket.data.roomId;
+    if (!roomId || !rooms[roomId]) return;
+    if (rooms[roomId].host !== socket.id) return;
+    socket.to(roomId).emit('devices-requested');
+  });
+
+  // 방장이 상대방 기기 전환 명령
+  socket.on('host-switch-device', (data) => {
+    const roomId = socket.data.roomId;
+    if (!roomId || !rooms[roomId]) return;
+    if (rooms[roomId].host !== socket.id) return;
+    socket.to(roomId).emit('host-switch-device', data);
+  });
+
+  // 방장이 상대방 마이크 제어
+  socket.on('host-control-mic', ({ muted }) => {
+    const roomId = socket.data.roomId;
+    if (!roomId || !rooms[roomId]) return;
+    if (rooms[roomId].host !== socket.id) return;
+    socket.to(roomId).emit('host-control-mic', { muted });
+  });
+
+  // 전체 지우기 — 방장만 허용
+  socket.on('whiteboard-clear', () => {
+    const roomId = socket.data.roomId;
+    if (!roomId || !rooms[roomId]) return;
+    if (rooms[roomId].host !== socket.id) return;
+    socket.to(roomId).emit('whiteboard-clear');
+  });
+
   socket.on('whiteboard-undo', (imageData) => socket.to(socket.data.roomId).emit('whiteboard-undo', imageData));
 
   // 웹 공유
@@ -97,9 +143,16 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const roomId = socket.data.roomId;
     if (roomId && rooms[roomId]) {
-      rooms[roomId] = rooms[roomId].filter(u => u.socketId !== socket.id);
+      rooms[roomId].users = rooms[roomId].users.filter(u => u.socketId !== socket.id);
+
+      // 방장이 나가면 남은 사람에게 방장 이전
+      if (rooms[roomId].host === socket.id && rooms[roomId].users.length > 0) {
+        rooms[roomId].host = rooms[roomId].users[0].socketId;
+        io.to(rooms[roomId].host).emit('host-transferred');
+      }
+
       socket.to(roomId).emit('user-left', { socketId: socket.id, username: socket.data.username });
-      if (rooms[roomId].length === 0) delete rooms[roomId];
+      if (rooms[roomId].users.length === 0) delete rooms[roomId];
     }
     console.log('disconnected:', socket.id);
   });

@@ -334,6 +334,13 @@ body {
   flex-shrink: 0;
 }
 
+.remote-settings-hint {
+  font-size: 12px;
+  color: #8892a4;
+  text-align: center;
+  padding: 4px 0 0;
+}
+
 .main-layout {
   display: flex;
   flex: 1;
@@ -391,6 +398,55 @@ body {
   padding: 2px 8px;
   border-radius: 6px;
   font-weight: 500;
+}
+
+.remote-controls {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: rgba(0,0,0,0.6);
+  backdrop-filter: blur(4px);
+}
+
+.remote-ctrl-btn {
+  background: rgba(255,255,255,0.12);
+  border: none;
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.remote-ctrl-btn:hover { background: rgba(255,255,255,0.22); }
+.remote-ctrl-btn.muted  { background: rgba(239,68,68,0.5); }
+
+.remote-vol-icon { font-size: 13px; flex-shrink: 0; }
+
+.remote-vol-slider {
+  flex: 1;
+  height: 4px;
+  accent-color: #5b7fff;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.remote-vol-display {
+  font-size: 10px;
+  color: #aaa;
+  width: 30px;
+  text-align: right;
+  flex-shrink: 0;
 }
 
 .waiting-overlay {
@@ -923,9 +979,14 @@ body {
   padding: 6px;
   display: flex;
   flex-direction: row;
+  flex-wrap: wrap;
   gap: 4px;
   z-index: 100;
   box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+
+#shape-popup {
+  width: calc(34px * 3 + 4px * 2 + 6px * 2);
 }
 
 .shape-opt, .pen-opt {
@@ -946,6 +1007,30 @@ body {
 
 .shape-opt:hover, .pen-opt:hover { background: #2d3555; }
 .shape-opt.active, .pen-opt.active { background: #5b7fff; color: #fff; border-color: #5b7fff; }
+
+.color-swatches {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.color-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.15);
+  cursor: pointer;
+  transition: transform 0.12s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.color-swatch:hover { transform: scale(1.2); }
+
+.color-swatch.active {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px #5b7fff;
+}
 
 .zoom-indicator {
   position: absolute;

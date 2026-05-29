@@ -29,6 +29,10 @@ let micVolumeVal = 100, speakerVolumeVal = 100;
 let micAudioCtx = null, micGainNode = null, gainedAudioTrack = null;
 let selectedMicId = '', selectedCamId = '', selectedSpeakerId = '';
 let isDrawing = false;
+let remoteDrawState = { tool: 'pen', color: '#000000', size: 4 };
+let shapeFilled = false;
+let isHost = false;
+let remoteMicMuted = false;
 let currentTool = 'pen';
 let strokeColor = '#000000';
 let strokeSize = 4;
@@ -95,7 +99,7 @@ const drawCtx       = drawCanvas.getContext('2d');
 const previewCtx    = previewCanvas.getContext('2d');
 const toolPen      = document.getElementById('tool-pen');
 const toolEraser   = document.getElementById('tool-eraser');
-const colorPicker  = document.getElementById('color-picker');
+const colorSwatches = document.querySelectorAll('.color-swatch');
 const sizeSlider   = document.getElementById('size-slider');
 const sizeDisplay  = document.getElementById('size-display');
 const clearBtn     = null; // 하단 clearAllBtn으로 통합
@@ -134,6 +138,17 @@ const recTimer     = document.getElementById('rec-timer');
 const copyLinkBtn    = document.getElementById('copy-link-btn');
 const chatToggleBtn  = document.getElementById('chat-toggle-btn');
 const chatCloseBtn   = document.getElementById('chat-close-btn');
+const remoteControls       = document.getElementById('remote-controls');
+const remoteMicBtn         = document.getElementById('remote-mic-btn');
+const remoteVolSlider      = document.getElementById('remote-vol-slider');
+const remoteVolDisplay     = document.getElementById('remote-vol-display');
+const remoteSettingsBtn    = document.getElementById('remote-settings-btn');
+const remoteSettingsModal  = document.getElementById('remote-settings-modal');
+const remoteSettingsClose  = document.getElementById('remote-settings-close');
+const remoteCamSelect      = document.getElementById('remote-cam-select');
+const remoteMicSelect      = document.getElementById('remote-mic-select');
+const remoteSpeakerSelect  = document.getElementById('remote-speaker-select');
+const remoteSettingsHint   = document.getElementById('remote-settings-hint');
 const chatSection    = document.querySelector('.chat-section');
 
 /* ════════════════════════════════════════════
@@ -196,6 +211,9 @@ async function initApp() {
   const shareUrl = new URL(window.location.href);
   shareUrl.searchParams.set('room', myRoomId);
   window.history.replaceState({}, '', shareUrl.toString());
+
+  // 입장 후 기기 목록 공유 (방장이 상대방 기기 설정할 수 있도록)
+  setTimeout(emitUserDevices, 1000);
 }
 
 /* ════════════════════════════════════════════
@@ -203,12 +221,20 @@ async function initApp() {
 ════════════════════════════════════════════ */
 function setupSocketEvents() {
 
-  socket.on('joined', ({ users }) => {
+  socket.on('joined', ({ users, isHost: host }) => {
+    isHost = host;
+    updateHostUI();
     const others = users.filter(u => u.socketId !== socket.id);
     if (others.length > 0) {
       remoteSocketId = others[0].socketId;
       remoteLabel.textContent = others[0].username;
     }
+  });
+
+  socket.on('host-transferred', () => {
+    isHost = true;
+    updateHostUI();
+    showSystemMsg('방장이 나가서 회원님이 방장이 되었습니다.');
   });
 
   socket.on('room-full', () => {
@@ -270,17 +296,19 @@ function setupSocketEvents() {
 
   // 화이트보드 수신
   socket.on('draw-start', ({ x, y, color, size, tool }) => {
+    remoteDrawState = { tool, color, size };
     setupCtx(drawCtx, tool, color, size);
     drawCtx.beginPath();
     drawCtx.moveTo(x, y);
   });
   socket.on('draw-move', ({ x, y }) => {
+    setupCtx(drawCtx, remoteDrawState.tool, remoteDrawState.color, remoteDrawState.size);
     drawCtx.lineTo(x, y);
     drawCtx.stroke();
   });
   socket.on('draw-end', () => drawCtx.closePath());
-  socket.on('draw-shape', ({ type, x1, y1, x2, y2, color, size }) => {
-    renderShape(drawCtx, type, x1, y1, x2, y2, color, size);
+  socket.on('draw-shape', ({ type, x1, y1, x2, y2, color, size, filled }) => {
+    renderShape(drawCtx, type, x1, y1, x2, y2, color, size, filled);
   });
   socket.on('draw-line', ({ x1, y1, x2, y2, color, size }) => {
     renderLine(drawCtx, x1, y1, x2, y2, color, size);
@@ -319,6 +347,67 @@ function setupSocketEvents() {
     img.onload = () => drawCtx.drawImage(img, 0, 0);
     img.src = imageData;
     if (pdfDoc) renderPdfPage(pdfPage);
+  });
+
+  // 방장이 보낸 마이크 제어 명령 수신
+  socket.on('host-control-mic', ({ muted }) => {
+    if (!localStream) return;
+    localStream.getAudioTracks().forEach(t => t.enabled = !muted);
+    micOn = !muted;
+    showSystemMsg(muted ? '방장이 마이크를 음소거했습니다.' : '방장이 마이크를 켰습니다.');
+  });
+
+  // 방장이 기기 목록 요청
+  socket.on('devices-requested', () => emitUserDevices());
+
+  // 방장이 수신: 상대방 기기 목록
+  socket.on('remote-devices', (devices) => {
+    fillRemoteDeviceSelect(remoteCamSelect,     devices.cameras,  devices.selectedCamId);
+    fillRemoteDeviceSelect(remoteMicSelect,     devices.mics,     devices.selectedMicId);
+    fillRemoteDeviceSelect(remoteSpeakerSelect, devices.speakers, devices.selectedSpeakerId);
+    remoteSettingsHint.style.display = 'none';
+  });
+
+  // 방장이 보낸 기기 전환 명령 수신
+  socket.on('host-switch-device', async ({ kind, deviceId }) => {
+    try {
+      if (kind === 'cam') {
+        const ns = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId } } });
+        const newTrack = ns.getVideoTracks()[0];
+        const old = localStream?.getVideoTracks()[0];
+        if (old) { localStream.removeTrack(old); old.stop(); }
+        localStream?.addTrack(newTrack);
+        newTrack.enabled = camOn;
+        localVideo.srcObject = localStream;
+        selectedCamId = deviceId;
+        if (peerConnection) {
+          const sender = peerConnection.getSenders().find(s => s.track?.kind === 'video');
+          if (sender) sender.replaceTrack(newTrack);
+        }
+      } else if (kind === 'mic') {
+        const ns = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: deviceId } } });
+        const newTrack = ns.getAudioTracks()[0];
+        const old = localStream?.getAudioTracks()[0];
+        if (old) { localStream.removeTrack(old); old.stop(); }
+        localStream?.addTrack(newTrack);
+        newTrack.enabled = micOn;
+        selectedMicId = deviceId;
+        setupMicGain();
+        if (peerConnection && gainedAudioTrack) {
+          const sender = peerConnection.getSenders().find(s => s.track?.kind === 'audio');
+          if (sender) sender.replaceTrack(gainedAudioTrack);
+        }
+      } else if (kind === 'speaker') {
+        selectedSpeakerId = deviceId;
+        if (typeof remoteVideo.setSinkId === 'function') {
+          await remoteVideo.setSinkId(deviceId);
+        }
+      }
+      showSystemMsg('방장이 기기를 변경했습니다.');
+      emitUserDevices();
+    } catch (e) {
+      console.error('기기 전환 실패:', e);
+    }
   });
 }
 
@@ -551,6 +640,67 @@ chatToggleBtn.addEventListener('click', () => chatSection.classList.toggle('mobi
 chatCloseBtn.addEventListener('click',  () => chatSection.classList.remove('mobile-open'));
 
 /* ════════════════════════════════════════════
+   방장 – 상대방 마이크/스피커 제어
+════════════════════════════════════════════ */
+remoteMicBtn.addEventListener('click', () => {
+  if (!isHost || !socket) return;
+  remoteMicMuted = !remoteMicMuted;
+  socket.emit('host-control-mic', { muted: remoteMicMuted });
+  remoteMicBtn.textContent = remoteMicMuted ? '🔇' : '🎤';
+  remoteMicBtn.classList.toggle('muted', remoteMicMuted);
+});
+
+remoteVolSlider.addEventListener('input', () => {
+  const val = parseInt(remoteVolSlider.value);
+  remoteVideo.volume = val / 100;
+  remoteVolDisplay.textContent = val + '%';
+});
+
+// 상대방 기기 설정 모달
+remoteSettingsBtn.addEventListener('click', () => {
+  if (!isHost) return;
+  remoteSettingsHint.style.display = '';
+  remoteCamSelect.innerHTML = '';
+  remoteMicSelect.innerHTML = '';
+  remoteSpeakerSelect.innerHTML = '';
+  socket && socket.emit('request-user-devices');
+  remoteSettingsModal.classList.remove('hidden');
+});
+remoteSettingsClose.addEventListener('click', () => remoteSettingsModal.classList.add('hidden'));
+remoteSettingsModal.addEventListener('click', e => {
+  if (e.target === remoteSettingsModal) remoteSettingsModal.classList.add('hidden');
+});
+
+remoteCamSelect.addEventListener('change', () => {
+  socket && socket.emit('host-switch-device', { kind: 'cam', deviceId: remoteCamSelect.value });
+});
+remoteMicSelect.addEventListener('change', () => {
+  socket && socket.emit('host-switch-device', { kind: 'mic', deviceId: remoteMicSelect.value });
+});
+remoteSpeakerSelect.addEventListener('change', () => {
+  socket && socket.emit('host-switch-device', { kind: 'speaker', deviceId: remoteSpeakerSelect.value });
+});
+
+function fillRemoteDeviceSelect(el, list, selectedId) {
+  el.innerHTML = list.map((d, i) =>
+    `<option value="${d.deviceId}" ${d.deviceId === selectedId ? 'selected' : ''}>${d.label || `장치 ${i + 1}`}</option>`
+  ).join('');
+}
+
+async function emitUserDevices() {
+  if (!socket) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    socket.emit('user-devices', {
+      cameras:  devices.filter(d => d.kind === 'videoinput') .map(d => ({ deviceId: d.deviceId, label: d.label || '' })),
+      mics:     devices.filter(d => d.kind === 'audioinput') .map(d => ({ deviceId: d.deviceId, label: d.label || '' })),
+      speakers: devices.filter(d => d.kind === 'audiooutput').map(d => ({ deviceId: d.deviceId, label: d.label || '' })),
+      selectedCamId, selectedMicId, selectedSpeakerId
+    });
+  } catch (_) {}
+}
+
+/* ════════════════════════════════════════════
    링크 복사
 ════════════════════════════════════════════ */
 copyLinkBtn.addEventListener('click', async () => {
@@ -585,6 +735,13 @@ leaveBtn.addEventListener('click', () => {
   if (micAudioCtx) { micAudioCtx.close(); micAudioCtx = null; }
   gainedAudioTrack = null;
   micOn = true; camOn = true;
+  isHost = false;
+  remoteMicMuted = false;
+  remoteMicBtn.textContent = '🎤';
+  remoteMicBtn.classList.remove('muted');
+  remoteVolSlider.value = 100;
+  remoteVolDisplay.textContent = '100%';
+  remoteControls.classList.add('hidden');
   if (socket) { socket.disconnect(); socket = null; }
   pdfDoc = null;
   window.history.replaceState({}, '', window.location.pathname);
@@ -684,7 +841,7 @@ drawCanvas.addEventListener('mousemove', e => {
   if (usesPreview()) {
     previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
     if (currentTool === 'shape') {
-      renderShape(previewCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize);
+      renderShape(previewCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize, shapeFilled);
     } else {
       let ex = x, ey = y;
       if (currentPenMode === 'snap') {
@@ -695,6 +852,7 @@ drawCanvas.addEventListener('mousemove', e => {
     }
     return;
   }
+  setupCtx(drawCtx, currentTool, strokeColor, strokeSize);
   drawCtx.lineTo(x, y);
   drawCtx.stroke();
   lastX = x; lastY = y;
@@ -710,10 +868,10 @@ drawCanvas.addEventListener('mousemove', e => {
       if (evt === 'mouseup') {
         const { x, y } = getPos(e);
         if (currentTool === 'shape') {
-          renderShape(drawCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize);
+          renderShape(drawCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize, shapeFilled);
           socket && socket.emit('draw-shape', {
             type: currentShape, x1: shapeStartX, y1: shapeStartY, x2: x, y2: y,
-            color: strokeColor, size: strokeSize
+            color: strokeColor, size: strokeSize, filled: shapeFilled
           });
         } else {
           let ex = x, ey = y;
@@ -852,7 +1010,11 @@ const toolShapeBtn = document.getElementById('tool-shape');
 const shapePopup   = document.getElementById('shape-popup');
 const shapeOpts    = document.querySelectorAll('.shape-opt');
 
-const SHAPE_ICONS = { rect: '▭', triangle: '△', circle: '○' };
+const SHAPE_ICONS = {
+  rect:     { outline: '▭', filled: '■' },
+  triangle: { outline: '△', filled: '▲' },
+  circle:   { outline: '○', filled: '●' },
+};
 
 toolShapeBtn.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -864,14 +1026,16 @@ shapeOpts.forEach(btn => {
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     currentShape = btn.dataset.shape;
+    shapeFilled  = btn.dataset.filled === 'true';
     currentTool  = 'shape';
     shapePopup.classList.add('hidden');
-    // 활성화 UI
     toolPen.classList.remove('active');
     toolEraser.classList.remove('active');
     toolShapeBtn.classList.add('active');
-    toolShapeBtn.textContent = SHAPE_ICONS[currentShape];
-    shapeOpts.forEach(o => o.classList.toggle('active', o.dataset.shape === currentShape));
+    toolShapeBtn.textContent = SHAPE_ICONS[currentShape][shapeFilled ? 'filled' : 'outline'];
+    shapeOpts.forEach(o => o.classList.toggle('active',
+      o.dataset.shape === currentShape && (o.dataset.filled === 'true') === shapeFilled
+    ));
     drawCanvas.style.cursor = 'crosshair';
   });
 });
@@ -882,12 +1046,11 @@ document.addEventListener('click', () => {
   penPopup.classList.add('hidden');
 });
 
-function renderShape(ctx, type, x1, y1, x2, y2, color, size) {
+function renderShape(ctx, type, x1, y1, x2, y2, color, size, filled = false) {
   ctx.globalCompositeOperation = 'source-over';
-  ctx.strokeStyle = color;
-  ctx.lineWidth   = size;
-  ctx.lineCap     = 'round';
-  ctx.lineJoin    = 'round';
+  ctx.lineWidth  = size;
+  ctx.lineCap    = 'round';
+  ctx.lineJoin   = 'round';
   const padX = Math.abs(x2 - x1) * 0.08;
   const padY = Math.abs(y2 - y1) * 0.08;
   const signX = x2 >= x1 ? 1 : -1;
@@ -911,7 +1074,13 @@ function renderShape(ctx, type, x1, y1, x2, y2, color, size) {
     ctx.lineTo(x1 + pad * signX, y2);
     ctx.closePath();
   }
-  ctx.stroke();
+  if (filled) {
+    ctx.fillStyle = color;
+    ctx.fill();
+  } else {
+    ctx.strokeStyle = color;
+    ctx.stroke();
+  }
 }
 
 /* ────────── 커서 ────────── */
@@ -960,7 +1129,13 @@ toolEraser.addEventListener('click', () => {
   setEraserCursor(strokeSize);
 });
 
-colorPicker.addEventListener('input', e => { strokeColor = e.target.value; });
+colorSwatches.forEach(btn => {
+  btn.addEventListener('click', () => {
+    strokeColor = btn.dataset.color;
+    colorSwatches.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
 
 sizeSlider.addEventListener('input', e => {
   strokeSize = parseInt(e.target.value, 10);
@@ -968,7 +1143,17 @@ sizeSlider.addEventListener('input', e => {
   if (currentTool === 'eraser') setEraserCursor(strokeSize);
 });
 
+function updateHostUI() {
+  localLabel.textContent = isHost ? `👑 ${myUsername}` : myUsername;
+  clearAllBtn.style.opacity = isHost ? '1' : '0.3';
+  clearAllBtn.style.cursor  = isHost ? 'pointer' : 'not-allowed';
+  clearAllBtn.title = isHost ? '전체 지우기' : '방장만 지울 수 있습니다';
+  if (isHost) remoteControls.classList.remove('hidden');
+  else        remoteControls.classList.add('hidden');
+}
+
 clearAllBtn.addEventListener('click', () => {
+  if (!isHost) return;
   clearDrawCanvas();
   saveSnapshot();
   socket && socket.emit('whiteboard-clear');

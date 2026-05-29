@@ -1,13 +1,33 @@
 {
-  "name": "video-chat",
+  "name": "video-whiteboard",
   "version": "1.0.0",
-  "description": "2-person video chat with text messaging",
-  "main": "server.js",
+  "description": "화상 화이트보드 앱",
+  "main": "main.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "electron": "electron .",
+    "build": "electron-builder"
   },
   "dependencies": {
     "express": "^4.18.2",
     "socket.io": "^4.7.2"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.whiteboard.app",
+    "productName": "화상 화이트보드",
+    "files": [
+      "main.js",
+      "server.js",
+      "public/**",
+      "node_modules/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "portable"
+    }
   }
 }
