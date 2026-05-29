@@ -55,6 +55,13 @@
               <p>상대방 대기 중...</p>
             </div>
             <span class="video-label" id="remote-label">상대방</span>
+            <div id="remote-controls" class="remote-controls hidden">
+              <button id="remote-mic-btn" class="remote-ctrl-btn" title="마이크 음소거">🎤</button>
+              <span class="remote-vol-icon">🔊</span>
+              <input id="remote-vol-slider" type="range" min="0" max="100" value="100" class="remote-vol-slider" title="스피커 볼륨" />
+              <span id="remote-vol-display" class="remote-vol-display">100%</span>
+              <button id="remote-settings-btn" class="remote-ctrl-btn" title="상대방 기기 설정">⚙️</button>
+            </div>
           </div>
           <div class="video-box local-box">
             <video id="local-video" autoplay playsinline muted></video>
@@ -107,8 +114,15 @@
               </div>
             </div>
             <div class="tool-group">
-              <label class="tool-label">색상</label>
-              <input id="color-picker" type="color" value="#000000" title="색상 선택" />
+              <div class="color-swatches">
+                <button class="color-swatch active" data-color="#000000" style="background:#000000" title="검은색"></button>
+                <button class="color-swatch" data-color="#ffffff" style="background:#ffffff" title="흰색"></button>
+                <button class="color-swatch" data-color="#ef4444" style="background:#ef4444" title="빨간색"></button>
+                <button class="color-swatch" data-color="#3b82f6" style="background:#3b82f6" title="파란색"></button>
+                <button class="color-swatch" data-color="#f97316" style="background:#f97316" title="주황색"></button>
+                <button class="color-swatch" data-color="#a855f7" style="background:#a855f7" title="보라색"></button>
+                <button class="color-swatch" data-color="#eab308" style="background:#eab308" title="노란색"></button>
+              </div>
             </div>
             <div class="tool-group">
               <label class="tool-label">굵기</label>
@@ -226,6 +240,38 @@
               <span id="speaker-volume-display" class="settings-range-val">100%</span>
             </div>
           </div>
+        </div>
+      </div>
+    <!-- 상대방 기기 설정 모달 (방장 전용) -->
+    <div id="remote-settings-modal" class="settings-modal hidden">
+      <div class="settings-box">
+        <div class="settings-header">
+          <span>⚙️ 상대방 기기 설정</span>
+          <button id="remote-settings-close" class="settings-close-btn">✕</button>
+        </div>
+        <div class="settings-body">
+          <div class="settings-section">
+            <div class="settings-section-title">📷 카메라</div>
+            <div class="settings-row">
+              <label>장치</label>
+              <select id="remote-cam-select" class="settings-select"></select>
+            </div>
+          </div>
+          <div class="settings-section">
+            <div class="settings-section-title">🎤 마이크</div>
+            <div class="settings-row">
+              <label>장치</label>
+              <select id="remote-mic-select" class="settings-select"></select>
+            </div>
+          </div>
+          <div class="settings-section">
+            <div class="settings-section-title">🔊 스피커</div>
+            <div class="settings-row">
+              <label>장치</label>
+              <select id="remote-speaker-select" class="settings-select"></select>
+            </div>
+          </div>
+          <p id="remote-settings-hint" class="remote-settings-hint">상대방이 아직 기기 정보를 보내지 않았습니다.</p>
         </div>
       </div>
     </div>
