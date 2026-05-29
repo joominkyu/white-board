@@ -1,31 +1,15 @@
 const { app, BrowserWindow, session } = require('electron');
-const net = require('net');
 
-// 내장 서버 시작
-require('./server');
+const SERVER_URL = 'https://your-server.up.railway.app';
 
-function waitForServer(port, cb) {
-  const client = new net.Socket();
-  client.connect(port, '127.0.0.1', () => {
-    client.destroy();
-    cb();
-  });
-  client.on('error', () => {
-    setTimeout(() => waitForServer(port, cb), 100);
-  });
+function setupPermissions() {
+  const allowed = ['media', 'camera', 'microphone', 'audioCapture', 'videoCapture'];
+  session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => cb(allowed.includes(permission)));
+  session.defaultSession.setPermissionCheckHandler((wc, permission) => allowed.includes(permission));
 }
 
-function createWindow() {
-  // 카메라/마이크 권한 자동 허용
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    const allowed = ['media', 'camera', 'microphone', 'audioCapture', 'videoCapture'];
-    callback(allowed.includes(permission));
-  });
-
-  session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
-    const allowed = ['media', 'camera', 'microphone', 'audioCapture', 'videoCapture'];
-    return allowed.includes(permission);
-  });
+function createMainWindow() {
+  setupPermissions();
 
   const win = new BrowserWindow({
     width: 1400,
@@ -39,20 +23,16 @@ function createWindow() {
       contextIsolation: true,
     }
   });
-
   win.setMenuBarVisibility(false);
-
-  waitForServer(3000, () => {
-    win.loadURL('http://localhost:3000');
-  });
+  win.loadURL(SERVER_URL);
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(createMainWindow);
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
 });
