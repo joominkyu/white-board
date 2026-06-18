@@ -1,6 +1,7 @@
 const { app, BrowserWindow, session } = require('electron');
+require('dotenv').config();
 
-const SERVER_URL = 'https://upbeat-dream-production-a20c.up.railway.app';
+const SERVER_URL = process.env.SERVER_URL;
 
 function setupPermissions() {
   const allowed = ['media', 'camera', 'microphone', 'audioCapture', 'videoCapture'];
