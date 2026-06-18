@@ -166,6 +166,23 @@ cloudflared tunnel --url http://localhost:3000
 
 브라우저 없이 독립 실행 프로그램으로 사용할 수 있습니다.
 
+### 환경 변수 설정
+
+Electron 앱은 접속할 서버 주소를 `.env` 파일에서 읽습니다.
+
+```bash
+# .env.example을 복사해서 생성
+cp .env.example .env
+```
+
+`.env` 파일을 열고 실제 서버 주소를 입력하세요:
+
+```
+SERVER_URL=https://your-server.up.railway.app
+```
+
+> `.env` 파일은 git에 포함되지 않습니다. 배포된 서버 주소는 본인이 직접 입력해야 합니다.
+
 ### 개발 모드 실행
 
 ```bash
