@@ -3,5 +3,3 @@ node_modules/
 *.log
 .claude/
 .idea/
-dist/
-dist-packager/

@@ -953,7 +953,9 @@ function snapEnd(x, y) {
 
 // 마우스·터치·펜을 Pointer Events 하나로 처리
 let activePointerId = null;
-let penUsed = false; // 펜을 한 번이라도 쓰면 손가락·손바닥 터치로는 그리지 않음 (손바닥 인식)
+// 손바닥 인식: 펜을 쓰는 동안(마지막 펜 입력 후 10초)에는 손가락·손바닥 터치로 그리지 않음
+const PEN_HOLD_MS = 10 * 1000;
+let lastPenAt = 0;
 
 // 정규화 좌표 + 펜일 때만 필압(0~1)
 function strokePoint(e) {
@@ -965,8 +967,8 @@ function strokePoint(e) {
 
 drawCanvas.addEventListener('pointerdown', e => {
   if (reviewMode) return;
-  if (e.pointerType === 'pen') penUsed = true;
-  if (e.pointerType === 'touch' && penUsed) return;
+  if (e.pointerType === 'pen') lastPenAt = Date.now();
+  if (e.pointerType === 'touch' && Date.now() - lastPenAt < PEN_HOLD_MS) return;
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   // 두 번째 손가락(핀치 줌 등)이 닿으면 그리던 획을 마무리
   if (activePointerId !== null) { finishDrawing(e, false); return; }
@@ -1369,7 +1371,7 @@ pdfInput.addEventListener('change', async (e) => {
 });
 
 async function loadPdfFromServer(version) {
-  const res = await fetch(`/rooms/${encodeURIComponent(myRoomId)}/pdf?v=${version}`);
+  const res = await fetch(`/rooms/${encodeURIComponent(myRoomId)}/pdf?v=${version}`, { headers: { 'X-Socket-Id': socket.id } });
   if (!res.ok) { showSystemMsg('PDF를 불러오지 못했습니다.'); return; }
   await loadPdfData(new Uint8Array(await res.arrayBuffer()), version);
 }

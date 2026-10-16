@@ -21,10 +21,9 @@ if (!LIVE_CLASS_SECRET) console.warn('LIVE_CLASS_SECRET 미설정 — 수업 입
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*' }
-  // PDF는 HTTP로 업로드하므로 소켓 메시지 크기는 기본값(1MB) 사용
-});
+// 페이지와 소켓을 같은 주소에서 서비스하므로 CORS 허용 불필요.
+// PDF는 HTTP로 업로드하므로 소켓 메시지 크기는 기본값(1MB) 사용
+const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -243,9 +242,13 @@ app.post('/rooms/:roomId/pdf', express.raw({ type: 'application/pdf', limit: MAX
   }
 });
 
+// 그 방에 접속한 사람만 내려받을 수 있음 (올리기와 같은 검사)
 app.get('/rooms/:roomId/pdf', (req, res) => {
-  const room = rooms[req.params.roomId];
-  if (!room || !room.pdf) return res.status(404).end();
+  const roomId = req.params.roomId;
+  const room = rooms[roomId];
+  const requester = io.sockets.sockets.get(req.get('X-Socket-Id') || '');
+  if (!room || !requester || requester.data.roomId !== roomId) return res.status(403).end();
+  if (!room.pdf) return res.status(404).end();
   res.type('application/pdf').send(room.pdf.buffer);
 });
 
