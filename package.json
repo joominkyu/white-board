@@ -2,11 +2,9 @@
   "name": "video-whiteboard",
   "version": "1.0.0",
   "description": "화상 화이트보드 앱",
-  "main": "main.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "electron": "electron .",
-    "build": "electron-builder"
+    "start": "node server.js"
   },
   "dependencies": {
     "@sentry/node": "^10.76.2",
@@ -14,24 +12,5 @@
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.3",
     "socket.io": "^4.7.2"
-  },
-  "devDependencies": {
-    "electron": "^44.8.0",
-    "electron-builder": "^26.15.3"
-  },
-  "build": {
-    "appId": "com.whiteboard.app",
-    "productName": "화상 화이트보드",
-    "files": [
-      "main.js",
-      ".env",
-      "server.js",
-      "public/**",
-      "node_modules/**",
-      "package.json"
-    ],
-    "win": {
-      "target": "portable"
-    }
   }
 }

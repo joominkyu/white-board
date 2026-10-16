@@ -182,80 +182,10 @@ TURN 중계는 트래픽만큼 과금됩니다($0.05/GB, 매월 1,000GB 무료).
 
 ---
 
-## 외부에서 접속하는 방법 (Cloudflare Tunnel)
-
-같은 Wi-Fi가 아닌 다른 장소에서 접속하려면 Cloudflare Tunnel을 사용합니다.
-
-### cloudflared 설치
-
-```bash
-# Windows (winget)
-winget install Cloudflare.cloudflared
-```
-
-또는 [Cloudflare 공식 다운로드 페이지](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)에서 직접 다운로드
-
-### 외부 주소 생성
-
-서버를 실행한 상태에서 별도 터미널을 열고:
-
-```bash
-cloudflared tunnel --url http://localhost:3000
-```
-
-출력되는 `https://xxxx.trycloudflare.com` 주소를 상대방에게 공유하면 됩니다.
-
-> 계정 없이 임시 터널을 사용할 수 있습니다. 영구 도메인이 필요하면 [Cloudflare Zero Trust](https://dash.cloudflare.com/)에서 터널을 등록하세요.  
-> **주의**: 매번 실행마다 새로운 주소가 생성됩니다.  
-> **주의**: 카메라/마이크는 HTTPS에서만 작동하므로 반드시 `https://` 주소를 사용하세요.
-
----
-
-## Electron 데스크탑 앱
-
-브라우저 없이 독립 실행 프로그램으로 사용할 수 있습니다.
-
-### 환경 변수 설정
-
-Electron 앱은 접속할 서버 주소를 `.env` 파일에서 읽습니다.
-
-```bash
-# .env.example을 복사해서 생성
-cp .env.example .env
-```
-
-`.env` 파일을 열고 실제 서버 주소를 입력하세요:
-
-```
-SERVER_URL=https://your-server.up.railway.app
-```
-
-> `.env` 파일은 git에 포함되지 않습니다. 배포된 서버 주소는 본인이 직접 입력해야 합니다.
-
-### 개발 모드 실행
-
-```bash
-npm run electron
-```
-
-### 빌드 (.exe)
-
-```bash
-npm run build
-```
-
-빌드 결과물은 `dist/win-unpacked/화상 화이트보드.exe`에 생성됩니다.
-
-> **참고**: `.env`는 빌드 시 앱에 함께 포함됩니다. 서버 주소를 바꾸면 다시 빌드하세요.  
-> 앱 안에서 열리는 새 창(새 탭 링크 등)은 기본 브라우저로 열립니다.
-
----
-
 ## 파일 구조
 
 ```
 white-board/
-├── main.js          # Electron 메인 프로세스
 ├── server.js        # Node.js 서버 (시그널링 + 채팅 + 방 상태·필기 보관 + PDF 업로드 + TURN 자격증명)
 ├── package.json
 └── public/
@@ -272,5 +202,4 @@ white-board/
 - **화상통화**: WebRTC (P2P) + Cloudflare TURN
 - **PDF 렌더링**: PDF.js
 - **시그널링**: Socket.io
-- **데스크탑**: Electron
-- **외부 터널**: Cloudflare Tunnel
+- **에러 모니터링**: Sentry
