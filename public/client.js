@@ -14,6 +14,10 @@ const FALLBACK_ICE_SERVERS = [
 // 얼굴 영상 최대 비트레이트 — 필기는 영상이 아니라 데이터로 동기화되므로 낮춰도 수업 품질 영향이 적고,
 // TURN 중계 비용(트래픽 과금)을 줄임. 음성 포함 약 600kbps
 const VIDEO_MAX_BITRATE = 550_000;
+// 화면 공유는 글씨가 많아 더 높게 (공유하는 동안만)
+const SCREEN_MAX_BITRATE = 1_200_000;
+let screenTrack = null;     // 내가 공유 중인 화면 트랙
+let remoteSharing = false;  // 상대가 화면 공유 중
 
 // 내 획 식별용 ID — 입장 시 서버가 알려줌 (봄노트 사용자 ID)
 let clientId = '';
@@ -127,21 +131,15 @@ const zoomIndicator = document.getElementById('zoom-indicator');
 
 // 모드 탭
 const wbContent   = document.getElementById('wb-content');
-const webContent  = document.getElementById('web-content');
+const screenContent = document.getElementById('screen-content');
 const modeWbBtn   = document.getElementById('mode-wb');
-const modeWebBtn  = document.getElementById('mode-web');
+const modeScreenBtn = document.getElementById('mode-screen');
+const screenView    = document.getElementById('screen-view');
+const screenEmpty   = document.getElementById('screen-empty');
+const screenShareBtn = document.getElementById('screen-share-btn');
+const remoteRecBanner = document.getElementById('remote-rec-banner');
 const clearAllBtn = document.getElementById('clear-all-btn');
 
-// 웹 패널
-const webFrame    = document.getElementById('web-frame');
-const webUrlInput = document.getElementById('web-url');
-const webGoBtn    = document.getElementById('web-go');
-const webBack     = document.getElementById('web-back');
-const webForward  = document.getElementById('web-forward');
-const webRefresh  = document.getElementById('web-refresh');
-const webNewtab   = document.getElementById('web-newtab');
-const webBlocked  = document.getElementById('web-blocked');
-const webOpenLink = document.getElementById('web-open-link');
 const recordBtn    = document.getElementById('record-btn');
 const recIndicator = document.getElementById('rec-indicator');
 const recTimer     = document.getElementById('rec-timer');
@@ -234,6 +232,8 @@ function setupSocketEvents() {
 
   socket.on('joined', async ({ me, users, isHost: host, state }) => {
     clientId = me;
+    if (mediaRecorder && mediaRecorder.state === 'recording') socket.emit('recording-state', true);
+    if (screenTrack) socket.emit('screen-share-state', true);
     if (hasJoined) showSystemMsg('서버에 다시 연결되었습니다.');
     hasJoined = true;
     isHost = host;
@@ -314,6 +314,13 @@ function setupSocketEvents() {
     statusBadge.className = 'status-badge waiting';
     remoteSocketId = '';
     if (peerConnection) { peerConnection.close(); peerConnection = null; }
+    remoteRecBanner.classList.add('hidden');
+    if (remoteSharing) {
+      remoteSharing = false;
+      screenView.srcObject = null;
+      screenEmpty.classList.remove('hidden');
+      switchMode('wb');
+    }
   });
 
   // 채팅
@@ -360,7 +367,20 @@ function setupSocketEvents() {
   });
 
   // 웹 공유
-  socket.on('web-navigate', (url) => navigateWebFrame(url, false));
+  // 상대방 녹화 상태 — 녹화 중이면 상단에 표시
+  socket.on('recording-state', ({ recording, username }) => {
+    remoteRecBanner.classList.toggle('hidden', !recording);
+    showSystemMsg(recording ? `${username}님이 녹화를 시작했습니다.` : `${username}님이 녹화를 중지했습니다.`);
+  });
+
+  // 상대방 화면 공유 — 공유 중이면 큰 화면으로 전환
+  socket.on('screen-share-state', ({ sharing }) => {
+    remoteSharing = sharing;
+    screenView.srcObject = sharing ? remoteVideo.srcObject : null;
+    screenEmpty.classList.toggle('hidden', sharing);
+    switchMode(sharing ? 'screen' : 'wb');
+    showSystemMsg(sharing ? '상대방이 화면 공유를 시작했습니다.' : '상대방이 화면 공유를 끝냈습니다.');
+  });
 
   // 방장이 보낸 마이크 제어 명령 수신
   socket.on('host-control-mic', ({ muted }) => {
@@ -393,7 +413,7 @@ function setupSocketEvents() {
         newTrack.enabled = camOn;
         localVideo.srcObject = localStream;
         selectedCamId = deviceId;
-        if (peerConnection) {
+        if (peerConnection && !screenTrack) {
           const sender = peerConnection.getSenders().find(s => s.track?.kind === 'video');
           if (sender) sender.replaceTrack(newTrack);
         }
@@ -481,8 +501,9 @@ async function createPeerConnection() {
   peerConnection = pc;
 
   if (localStream) {
-    localStream.getVideoTracks().forEach(t => peerConnection.addTransceiver(t, {
-      direction: 'sendrecv', streams: [localStream], sendEncodings: [{ maxBitrate: VIDEO_MAX_BITRATE }]
+    localStream.getVideoTracks().forEach(t => peerConnection.addTransceiver(screenTrack || t, {
+      direction: 'sendrecv', streams: [localStream],
+      sendEncodings: [{ maxBitrate: screenTrack ? SCREEN_MAX_BITRATE : VIDEO_MAX_BITRATE }]
     }));
     if (gainedAudioTrack) peerConnection.addTrack(gainedAudioTrack, localStream);
     else localStream.getAudioTracks().forEach(t => peerConnection.addTrack(t, localStream));
@@ -495,6 +516,7 @@ async function createPeerConnection() {
   peerConnection.ontrack = (e) => {
     if (e.streams && e.streams[0]) {
       remoteVideo.srcObject = e.streams[0];
+      if (remoteSharing) screenView.srcObject = e.streams[0];
     } else {
       // 스트림 없이 트랙만 오는 경우
       if (!remoteVideo.srcObject) remoteVideo.srcObject = new MediaStream();
@@ -625,7 +647,7 @@ camSelect.addEventListener('change', async () => {
     localStream.addTrack(newTrack);
     newTrack.enabled = camOn;
     localVideo.srcObject = localStream;
-    if (peerConnection) {
+    if (peerConnection && !screenTrack) {
       const sender = peerConnection.getSenders().find(s => s.track?.kind === 'video');
       if (sender) sender.replaceTrack(newTrack);
     }
@@ -772,6 +794,13 @@ leaveBtn.addEventListener('click', leaveRoom);
 
 function leaveRoom() {
   if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording();
+  if (screenTrack) { screenTrack.stop(); screenTrack = null; }
+  screenShareBtn.querySelector('.btn-label').textContent = '화면 공유';
+  screenShareBtn.classList.remove('active');
+  remoteSharing = false;
+  screenView.srcObject = null;
+  remoteRecBanner.classList.add('hidden');
+  switchMode('wb');
   if (peerConnection) { peerConnection.close(); peerConnection = null; }
   pendingCandidates = [];
   iceConfigPromise = null;
@@ -851,6 +880,9 @@ const toPx = ([x, y]) => [x * drawCanvas.width, y * drawCanvas.height];
 // 슬라이더 굵기(줌 100% 기준 px) → 캔버스 너비 대비 비율
 const normSize = () => strokeSize * canvasZoom / drawCanvas.width;
 
+// 펜 필압(0~1) → 굵기 배율. 필압 정보가 없으면 1
+const pressureScale = (p) => (p === undefined ? 1 : 0.3 + 1.4 * p);
+
 // W·H: 그릴 캔버스 크기 (기본은 화면 캔버스, PDF 내보내기 때는 페이지 이미지 크기)
 function drawStroke(ctx, s, W = drawCanvas.width, H = drawCanvas.height) {
   const pts = s.points.map(([x, y]) => [x * W, y * H]);
@@ -864,6 +896,18 @@ function drawStroke(ctx, s, W = drawCanvas.width, H = drawCanvas.height) {
     return;
   }
   setupCtx(ctx, s.tool, s.color, size);
+  // 필압이 있는 펜 획은 구간마다 굵기를 바꿔 그림
+  if (s.points[0].length > 2) {
+    for (let i = 0; i < pts.length; i++) {
+      const j = Math.max(0, i - 1);
+      ctx.lineWidth = size * pressureScale((s.points[j][2] + s.points[i][2]) / 2);
+      ctx.beginPath();
+      ctx.moveTo(pts[j][0], pts[j][1]);
+      ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.stroke();
+    }
+    return;
+  }
   ctx.beginPath();
   ctx.moveTo(pts[0][0], pts[0][1]);
   if (pts.length === 1) ctx.lineTo(pts[0][0], pts[0][1]); // 점 하나
@@ -874,7 +918,7 @@ function drawStroke(ctx, s, W = drawCanvas.width, H = drawCanvas.height) {
 // 그리는 중인 자유선의 한 구간만 그림 (독립된 path라 동시에 그려도 섞이지 않음)
 function drawSegment(s, from, to) {
   const [x1, y1] = toPx(from), [x2, y2] = toPx(to);
-  setupCtx(drawCtx, s.tool, s.color, s.size * drawCanvas.width);
+  setupCtx(drawCtx, s.tool, s.color, s.size * drawCanvas.width * pressureScale(to[2] === undefined ? undefined : ((from[2] ?? to[2]) + to[2]) / 2));
   drawCtx.beginPath();
   drawCtx.moveTo(x1, y1);
   drawCtx.lineTo(x2, y2);
@@ -907,13 +951,34 @@ function snapEnd(x, y) {
   return dx >= dy ? [x, shapeStartY] : [shapeStartX, y];
 }
 
-drawCanvas.addEventListener('mousedown', e => {
+// 마우스·터치·펜을 Pointer Events 하나로 처리
+let activePointerId = null;
+let penUsed = false; // 펜을 한 번이라도 쓰면 손가락·손바닥 터치로는 그리지 않음 (손바닥 인식)
+
+// 정규화 좌표 + 펜일 때만 필압(0~1)
+function strokePoint(e) {
+  const { x, y } = getPos(e);
+  const p = toNorm(x, y);
+  if (e.pointerType === 'pen') p.push(Math.round(e.pressure * 100) / 100);
+  return p;
+}
+
+drawCanvas.addEventListener('pointerdown', e => {
   if (reviewMode) return;
+  if (e.pointerType === 'pen') penUsed = true;
+  if (e.pointerType === 'touch' && penUsed) return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  // 두 번째 손가락(핀치 줌 등)이 닿으면 그리던 획을 마무리
+  if (activePointerId !== null) { finishDrawing(e, false); return; }
+  activePointerId = e.pointerId;
+  // 캔버스 밖으로 나가도 획이 끊기지 않도록 (포인터가 이미 해제됐으면 실패해도 그리기는 계속)
+  try { drawCanvas.setPointerCapture(e.pointerId); } catch (_) {}
+
   isDrawing = true;
   const { x, y } = getPos(e);
   lastX = x; lastY = y;
   if (usesPreview()) { shapeStartX = x; shapeStartY = y; return; }
-  const p = toNorm(x, y);
+  const p = strokePoint(e);
   myStroke = {
     id: uid(), owner: clientId, page: currentPageKey(), kind: 'path',
     tool: currentTool, color: strokeColor, size: normSize(), points: [p]
@@ -923,10 +988,10 @@ drawCanvas.addEventListener('mousedown', e => {
   socket && socket.emit('stroke-start', myStroke);
 });
 
-drawCanvas.addEventListener('mousemove', e => {
-  if (!isDrawing) return;
-  const { x, y } = getPos(e);
+drawCanvas.addEventListener('pointermove', e => {
+  if (e.pointerId !== activePointerId || !isDrawing) return;
   if (usesPreview()) {
+    const { x, y } = getPos(e);
     previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
     if (currentTool === 'shape') {
       renderShape(previewCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize * canvasZoom, shapeFilled);
@@ -937,54 +1002,42 @@ drawCanvas.addEventListener('mousemove', e => {
     return;
   }
   if (!myStroke) return;
-  const p = toNorm(x, y);
-  const prev = myStroke.points[myStroke.points.length - 1];
-  myStroke.points.push(p);
-  drawSegment(myStroke, prev, p);
-  lastX = x; lastY = y;
-  socket && socket.emit('stroke-points', { id: myStroke.id, points: [p] });
+  // 펜은 이벤트 사이 좌표도 모아서 그려 선을 매끄럽게
+  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  const added = [];
+  for (const ev of (events.length ? events : [e])) {
+    const p = strokePoint(ev);
+    const prev = myStroke.points[myStroke.points.length - 1];
+    myStroke.points.push(p);
+    drawSegment(myStroke, prev, p);
+    added.push(p);
+  }
+  socket && socket.emit('stroke-points', { id: myStroke.id, points: added });
 });
 
-['mouseup', 'mouseleave'].forEach(evt =>
-  drawCanvas.addEventListener(evt, e => {
-    if (!isDrawing) return;
-    isDrawing = false;
-    if (usesPreview()) {
-      previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
-      if (evt === 'mouseup') {
-        const { x, y } = getPos(e);
-        const base = { id: uid(), owner: clientId, page: currentPageKey(), color: strokeColor, size: normSize() };
-        if (currentTool === 'shape') {
-          commitStroke({ ...base, kind: 'shape', shape: currentShape, filled: shapeFilled,
-            points: [toNorm(shapeStartX, shapeStartY), toNorm(x, y)] });
-        } else {
-          const [ex, ey] = snapEnd(x, y);
-          commitStroke({ ...base, kind: 'line', points: [toNorm(shapeStartX, shapeStartY), toNorm(ex, ey)] });
-        }
-      }
-      return;
+function finishDrawing(e, commit) {
+  activePointerId = null;
+  if (!isDrawing) return;
+  isDrawing = false;
+  if (usesPreview()) {
+    previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+    if (!commit) return;
+    const { x, y } = getPos(e);
+    const base = { id: uid(), owner: clientId, page: currentPageKey(), color: strokeColor, size: normSize() };
+    if (currentTool === 'shape') {
+      commitStroke({ ...base, kind: 'shape', shape: currentShape, filled: shapeFilled,
+        points: [toNorm(shapeStartX, shapeStartY), toNorm(x, y)] });
+    } else {
+      const [ex, ey] = snapEnd(x, y);
+      commitStroke({ ...base, kind: 'line', points: [toNorm(shapeStartX, shapeStartY), toNorm(ex, ey)] });
     }
-    myStroke = null;
-  })
-);
+    return;
+  }
+  myStroke = null;
+}
 
-// 터치 지원 (멀티터치 시 드로잉 중단)
-drawCanvas.addEventListener('touchstart', e => {
-  if (e.touches.length > 1) return;
-  e.preventDefault();
-  drawCanvas.dispatchEvent(new MouseEvent('mousedown', { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY }));
-}, { passive: false });
-drawCanvas.addEventListener('touchmove', e => {
-  if (e.touches.length > 1) { isDrawing = false; return; }
-  e.preventDefault();
-  drawCanvas.dispatchEvent(new MouseEvent('mousemove', { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY }));
-}, { passive: false });
-drawCanvas.addEventListener('touchend', e => {
-  e.preventDefault();
-  // 손을 뗀 위치를 넘겨야 직선/도형 끝점이 맞음
-  const t = e.changedTouches[0];
-  drawCanvas.dispatchEvent(new MouseEvent('mouseup', t ? { clientX: t.clientX, clientY: t.clientY } : {}));
-}, { passive: false });
+drawCanvas.addEventListener('pointerup', e => { if (e.pointerId === activePointerId) finishDrawing(e, true); });
+drawCanvas.addEventListener('pointercancel', e => { if (e.pointerId === activePointerId) finishDrawing(e, false); });
 
 // 핀치 줌
 let pinchStartDist = 0, pinchStartZoom = 1;
@@ -1259,11 +1312,10 @@ function clearPdfCanvas() {
 /* ════════════════════════════════════════════
    서버에서 받은 방 상태 적용 (입장/재접속 시)
 ════════════════════════════════════════════ */
-async function applyRoomState({ pdf, pdfPage, strokes: serverStrokes, webUrl }) {
+async function applyRoomState({ pdf, pdfPage, strokes: serverStrokes }) {
   strokes = serverStrokes;
   myStroke = null;
   isDrawing = false;
-  if (webUrl) navigateWebFrame(webUrl, false);
 
   if (pdf) {
     if (pdf.version !== pdfVersion) await loadPdfFromServer(pdf.version);
@@ -1532,6 +1584,7 @@ function startRecording() {
   };
 
   mediaRecorder.start(500);
+  socket && socket.emit('recording-state', true);
   recStartTime = Date.now();
 
   // UI
@@ -1546,6 +1599,7 @@ function startRecording() {
 
 function stopRecording() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+  socket && socket.emit('recording-state', false);
   clearInterval(recTimerInterval);
   recordBtn.textContent = '⏺ 녹화';
   recordBtn.classList.remove('recording');
@@ -1564,64 +1618,82 @@ function fallbackDownload(blob, filename) {
 }
 
 /* ════════════════════════════════════════════
-   모드 전환 (화이트보드 ↔ 웹)
+   모드 전환 (화이트보드 ↔ 화면 공유 보기)
 ════════════════════════════════════════════ */
 modeWbBtn.addEventListener('click', () => switchMode('wb'));
-modeWebBtn.addEventListener('click', () => switchMode('web'));
+modeScreenBtn.addEventListener('click', () => switchMode('screen'));
 
 function switchMode(mode) {
-  if (mode === 'wb') {
-    wbContent.classList.remove('hidden');
-    webContent.classList.add('hidden');
-    pagesPanel.classList.toggle('hidden', !pdfDoc);
-    modeWbBtn.classList.add('active');
-    modeWebBtn.classList.remove('active');
-    clearAllBtn.style.display = '';
-  } else {
-    wbContent.classList.add('hidden');
-    webContent.classList.remove('hidden');
-    pagesPanel.classList.add('hidden');
-    modeWebBtn.classList.add('active');
-    modeWbBtn.classList.remove('active');
-    clearAllBtn.style.display = 'none';
-  }
+  const wb = mode === 'wb';
+  wbContent.classList.toggle('hidden', !wb);
+  screenContent.classList.toggle('hidden', wb);
+  pagesPanel.classList.toggle('hidden', !wb || !pdfDoc);
+  modeWbBtn.classList.toggle('active', wb);
+  modeScreenBtn.classList.toggle('active', !wb);
+  clearAllBtn.style.display = wb ? '' : 'none';
 }
 
 /* ════════════════════════════════════════════
-   웹 패널
+   화면 공유 (보내는 영상을 카메라 ↔ 화면으로 교체)
 ════════════════════════════════════════════ */
-function navigateWebFrame(url, broadcast = true) {
-  let target = url.trim();
-  if (!target) return;
-  if (!/^https?:\/\//i.test(target)) target = 'https://' + target;
-
-  webUrlInput.value = target;
-  webNewtab.href = target;
-  webOpenLink.href = target;
-  webBlocked.classList.add('hidden');
-  webFrame.src = target;
-
-  // 로드 후 차단 여부 감지 (같은 도메인만 가능, 크로스 오리진은 오류로 판단)
-  webFrame.onload = () => {
-    try {
-      // cross-origin이면 접근 시 예외 발생 → 로드는 됐지만 확인 불가
-      void webFrame.contentDocument;
-      webBlocked.classList.add('hidden');
-    } catch (_) {
-      // 크로스 오리진 정상 로드 (차단 아님)
-      webBlocked.classList.add('hidden');
-    }
-  };
-  webFrame.onerror = () => webBlocked.classList.remove('hidden');
-
-  if (broadcast && socket) socket.emit('web-navigate', target);
+function videoSender() {
+  return peerConnection && peerConnection.getSenders().find(s => s.track?.kind === 'video');
 }
 
-webGoBtn.addEventListener('click', () => navigateWebFrame(webUrlInput.value));
-webUrlInput.addEventListener('keydown', e => { if (e.key === 'Enter') navigateWebFrame(webUrlInput.value); });
-webRefresh.addEventListener('click', () => { webFrame.src = webFrame.src; });
-webBack.addEventListener('click', () => { try { webFrame.contentWindow.history.back(); } catch(_) {} });
-webForward.addEventListener('click', () => { try { webFrame.contentWindow.history.forward(); } catch(_) {} });
+async function setSenderBitrate(sender, maxBitrate) {
+  const params = sender.getParameters();
+  if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+  params.encodings[0].maxBitrate = maxBitrate;
+  try { await sender.setParameters(params); } catch (_) {}
+}
+
+async function startScreenShare() {
+  if (!localStream || !localStream.getVideoTracks()[0]) {
+    alert('카메라가 연결된 상태에서만 화면 공유를 할 수 있어요.');
+    return;
+  }
+  const sender = videoSender();
+  if (!sender) {
+    alert('상대방이 입장한 뒤 화면을 공유할 수 있어요.');
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false });
+  } catch (_) {
+    return; // 사용자가 취소
+  }
+  screenTrack = stream.getVideoTracks()[0];
+  screenTrack.contentHint = 'detail'; // 글씨 선명도 우선
+  screenTrack.onended = stopScreenShare; // 브라우저의 [공유 중지] 버튼
+  await sender.replaceTrack(screenTrack);
+  await setSenderBitrate(sender, SCREEN_MAX_BITRATE);
+  localVideo.srcObject = new MediaStream([screenTrack]);
+  screenShareBtn.querySelector('.btn-label').textContent = '공유 중지';
+  screenShareBtn.classList.add('active');
+  socket && socket.emit('screen-share-state', true);
+  showSystemMsg('화면 공유를 시작했습니다.');
+}
+
+async function stopScreenShare() {
+  if (!screenTrack) return;
+  const track = screenTrack;
+  screenTrack = null;
+  track.stop();
+  const sender = videoSender();
+  const camTrack = localStream && localStream.getVideoTracks()[0];
+  if (sender && camTrack) {
+    await sender.replaceTrack(camTrack);
+    await setSenderBitrate(sender, VIDEO_MAX_BITRATE);
+  }
+  localVideo.srcObject = localStream;
+  screenShareBtn.querySelector('.btn-label').textContent = '화면 공유';
+  screenShareBtn.classList.remove('active');
+  socket && socket.emit('screen-share-state', false);
+  showSystemMsg('화면 공유를 끝냈습니다.');
+}
+
+screenShareBtn.addEventListener('click', () => (screenTrack ? stopScreenShare() : startScreenShare()));
 
 // Ctrl+휠 줌
 canvasContainer.addEventListener('wheel', (e) => {

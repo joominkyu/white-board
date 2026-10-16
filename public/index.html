@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <title>화상 화이트보드</title>
-  <link rel="stylesheet" href="style.css?v=6" />
+  <link rel="stylesheet" href="style.css?v=7" />
 </head>
 <body>
 
@@ -28,6 +28,7 @@
       <div class="header-left">
         <span class="room-icon">📋</span>
         <span id="room-title"></span>
+        <span id="remote-rec-banner" class="remote-rec-banner hidden">● 상대방이 녹화 중입니다</span>
       </div>
       <div class="header-right">
         <span id="connection-status" class="status-badge waiting">대기 중</span>
@@ -68,6 +69,10 @@
           </div>
         </div>
         <div class="video-controls">
+          <button id="screen-share-btn" class="ctrl-btn" title="화면 공유">
+            <span class="btn-icon">🖥️</span>
+            <span class="btn-label">화면 공유</span>
+          </button>
           <button id="settings-btn" class="ctrl-btn" title="미디어 설정">
             <span class="btn-icon">⚙️</span>
             <span class="btn-label">설정</span>
@@ -150,34 +155,17 @@
           </div>
         </div>
 
-        <!-- ② 웹 모드 콘텐츠 -->
-        <div id="web-content" class="hidden">
-          <div class="web-bar">
-            <button id="web-back" class="web-ctrl-btn" title="뒤로">◀</button>
-            <button id="web-forward" class="web-ctrl-btn" title="앞으로">▶</button>
-            <button id="web-refresh" class="web-ctrl-btn" title="새로고침">↻</button>
-            <input id="web-url" type="text" class="web-url-input" value="https://www.google.com" placeholder="URL 입력..." />
-            <button id="web-go" class="web-go-btn">이동</button>
-            <a id="web-newtab" class="web-ctrl-btn" target="_blank" title="새 탭으로 열기">↗</a>
-          </div>
-          <div class="web-frame-wrap">
-            <iframe id="web-frame"
-              src="about:blank"
-              sandbox="allow-scripts allow-forms allow-popups allow-pointer-lock allow-same-origin"
-              allowfullscreen>
-            </iframe>
-            <div id="web-blocked" class="web-blocked hidden">
-              <p>🚫 이 사이트는 보안 정책으로 인해 임베딩이 차단됩니다.</p>
-              <a id="web-open-link" href="#" target="_blank">새 탭에서 열기 ↗</a>
-            </div>
-          </div>
+        <!-- ② 화면 공유 보기 (상대방이 공유한 화면을 크게) -->
+        <div id="screen-content" class="hidden">
+          <video id="screen-view" autoplay playsinline muted></video>
+          <p id="screen-empty" class="screen-empty">상대방이 화면을 공유하면 여기에 크게 보여요.</p>
         </div>
 
         <!-- ③ 하단 모드 탭 바 -->
         <div class="mode-bar">
           <div class="mode-tabs">
             <button id="mode-wb"  class="mode-tab active">✏️ 화이트보드</button>
-            <button id="mode-web" class="mode-tab">🌐 웹</button>
+            <button id="mode-screen" class="mode-tab">🖥️ 화면 공유</button>
           </div>
           <button id="clear-all-btn" class="clear-all-btn">🗑️ 전체 지우기</button>
         </div>
@@ -278,6 +266,6 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-  <script src="client.js?v=6"></script>
+  <script src="client.js?v=7"></script>
 </body>
 </html>

@@ -1,4 +1,13 @@
 require('dotenv').config();
+const Sentry = require('@sentry/node');
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: 'production',
+    initialScope: { tags: { service: 'whiteboard' } },
+    integrations: [Sentry.captureConsoleIntegration({ levels: ['error'] })],
+  });
+}
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -27,7 +36,7 @@ const ROOM_EXPIRE_MS = 10 * 60 * 1000; // 모두 나간 뒤 방 상태 보관 �
 // rooms: {
 //   roomId(봄노트 수업 ID): {
 //     users: [{ socketId, username, uid, role }], host: socketId(선생님),
-//     pdf: { buffer, name, version } | null, pdfPage, strokes: [], webUrl, expireTimer,
+//     pdf: { buffer, name, version } | null, pdfPage, strokes: [], expireTimer,
 //     pairedSince: 두 사람이 모두 접속한 시각(ms) | null, relayUsed: TURN 경유 여부,
 //     ready: 봄노트에서 저장된 필기를 불러오는 Promise, dirty: 저장 안 된 변경 있음
 //   }
@@ -70,7 +79,7 @@ async function fetchBoard(roomId) {
     headers: { 'X-Live-Secret': LIVE_CLASS_SECRET }
   });
   if (!res.ok) throw new Error(`status ${res.status}`);
-  return res.json(); // { board: { strokes, webUrl } | null, pdfPage, pdf: { name, url } | null }
+  return res.json(); // { board: { strokes } | null, pdfPage, pdf: { name, url } | null }
 }
 
 async function downloadPdf(pdf) {
@@ -84,7 +93,6 @@ async function loadRoomState(roomId, room) {
   try {
     const data = await fetchBoard(roomId);
     room.strokes = data.board?.strokes ?? [];
-    room.webUrl = data.board?.webUrl ?? '';
     room.pdfPage = data.pdfPage ?? 1;
     if (data.pdf) room.pdf = { buffer: await downloadPdf(data.pdf), name: data.pdf.name, version: Date.now() };
   } catch (e) {
@@ -99,7 +107,7 @@ async function saveBoard(roomId, room) {
     const res = await fetch(bomnoteUrl(`sessions/${encodeURIComponent(roomId)}/board`), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'X-Live-Secret': LIVE_CLASS_SECRET },
-      body: JSON.stringify({ strokes: room.strokes, webUrl: room.webUrl, pdfPage: room.pdfPage })
+      body: JSON.stringify({ strokes: room.strokes, pdfPage: room.pdfPage })
     });
     if (!res.ok) throw new Error(`status ${res.status}`);
   } catch (e) {
@@ -110,7 +118,7 @@ async function saveBoard(roomId, room) {
 
 function getOrCreateRoom(roomId) {
   if (!rooms[roomId]) {
-    const room = { users: [], host: null, pdf: null, pdfPage: 1, strokes: [], webUrl: '', pairedSince: null, relayUsed: false, dirty: false };
+    const room = { users: [], host: null, pdf: null, pdfPage: 1, strokes: [], pairedSince: null, relayUsed: false, dirty: false };
     room.ready = loadRoomState(roomId, room);
     rooms[roomId] = room;
   }
@@ -140,7 +148,8 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 function cleanPoints(points, max) {
   if (!Array.isArray(points) || points.length === 0 || points.length > max) return null;
   if (!points.every(p => Array.isArray(p) && isNum(p[0]) && isNum(p[1]))) return null;
-  return points.map(p => [p[0], p[1]]);
+  // 세 번째 값은 펜 필압(0~1, 있을 때만)
+  return points.map(p => (isNum(p[2]) ? [p[0], p[1], Math.min(1, Math.max(0, p[2]))] : [p[0], p[1]]));
 }
 
 function cleanStroke(s, owner) {
@@ -168,8 +177,7 @@ function roomStatePayload(room) {
   return {
     pdf: room.pdf ? { name: room.pdf.name, version: room.pdf.version } : null,
     pdfPage: room.pdfPage,
-    strokes: room.strokes,
-    webUrl: room.webUrl
+    strokes: room.strokes
   };
 }
 
@@ -289,6 +297,7 @@ app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') return res.status(413).end();
   next(err);
 });
+if (process.env.SENTRY_DSN) Sentry.setupExpressErrorHandler(app);
 
 // ── TURN 자격증명 (Cloudflare) ──
 const FALLBACK_ICE_SERVERS = [
@@ -381,6 +390,13 @@ io.on('connection', (socket) => {
       isHost: room.host === socket.id,
       state: roomStatePayload(room)
     });
+
+    for (const u of room.users) {
+      const other = io.sockets.sockets.get(u.socketId);
+      if (!other || other.id === socket.id) continue;
+      if (other.data.recording) socket.emit('recording-state', { recording: true, username: other.data.username });
+      if (other.data.sharing) socket.emit('screen-share-state', { sharing: true });
+    }
 
     console.log(`${username} joined room ${roomId} (host: ${room.host === socket.id}), total: ${room.users.length}`);
   });
@@ -491,13 +507,18 @@ io.on('connection', (socket) => {
     socket.to(socket.data.roomId).emit('host-control-mic', { muted: !!muted });
   });
 
-  // 웹 공유
-  socket.on('web-navigate', (url) => {
-    const room = rooms[socket.data.roomId];
-    if (!room || !isStr(url, 2000) || !/^https?:\/\//i.test(url)) return;
-    room.webUrl = url;
-    markDirty(room);
-    socket.to(socket.data.roomId).emit('web-navigate', url);
+  // 녹화 시작/중지 — 상대방 화면에 "녹화 중" 표시
+  socket.on('recording-state', (recording) => {
+    if (!socket.data.roomId) return;
+    socket.data.recording = recording === true;
+    socket.to(socket.data.roomId).emit('recording-state', { recording: socket.data.recording, username: socket.data.username });
+  });
+
+  // 화면 공유 시작/중지 — 상대방은 큰 화면으로 전환
+  socket.on('screen-share-state', (sharing) => {
+    if (!socket.data.roomId) return;
+    socket.data.sharing = sharing === true;
+    socket.to(socket.data.roomId).emit('screen-share-state', { sharing: socket.data.sharing });
   });
 
   // ── PDF 페이지 동기화 ──

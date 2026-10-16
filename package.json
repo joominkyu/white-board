@@ -9,6 +9,7 @@
     "build": "electron-builder"
   },
   "dependencies": {
+    "@sentry/node": "^10.76.2",
     "dotenv": "^17.4.2",
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.3",
