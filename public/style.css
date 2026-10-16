@@ -621,108 +621,6 @@ body {
   overflow: hidden;
 }
 
-/* ── 웹 모드 ── */
-#web-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.web-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  background: #141824;
-  border-bottom: 1px solid #252b3b;
-  flex-shrink: 0;
-}
-
-.web-ctrl-btn {
-  background: #1e2332;
-  border: 1px solid #3a4055;
-  border-radius: 7px;
-  padding: 5px 10px;
-  color: #c5cde0;
-  font-size: 14px;
-  cursor: pointer;
-  text-decoration: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 32px;
-  height: 32px;
-  transition: background 0.15s;
-}
-
-.web-ctrl-btn:hover { background: #252b3b; }
-
-.web-url-input {
-  flex: 1;
-  background: #252b3b;
-  border: 1px solid #3a4055;
-  border-radius: 8px;
-  padding: 6px 12px;
-  color: #e0e0e0;
-  font-size: 13px;
-  outline: none;
-  height: 32px;
-}
-
-.web-url-input:focus { border-color: #5b7fff; }
-
-.web-go-btn {
-  background: #5b7fff;
-  border: none;
-  border-radius: 8px;
-  padding: 6px 14px;
-  color: #fff;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  height: 32px;
-  white-space: nowrap;
-}
-
-.web-go-btn:hover { background: #4a6ee0; }
-
-.web-frame-wrap {
-  flex: 1;
-  position: relative;
-  overflow: hidden;
-}
-
-#web-frame {
-  width: 100%;
-  height: 100%;
-  border: none;
-  background: #fff;
-}
-
-.web-blocked {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background: #1a1f2e;
-  gap: 16px;
-}
-
-.web-blocked p {
-  color: #8892a4;
-  font-size: 14px;
-}
-
-.web-blocked a {
-  color: #5b7fff;
-  font-size: 14px;
-  text-decoration: underline;
-}
-
-/* ── 하단 모드 탭 바 ── */
 .mode-bar {
   display: flex;
   align-items: center;
@@ -1184,3 +1082,31 @@ body {
 .review-mode .mode-bar,
 .review-mode .toolbar .tool-group:not(.pdf-nav) { display: none !important; }
 .review-mode #draw-canvas { cursor: default !important; }
+
+/* ── 화면 공유 보기 ── */
+#screen-content {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  overflow: hidden;
+}
+#screen-view { width: 100%; height: 100%; object-fit: contain; }
+.screen-empty { position: absolute; color: #8892a4; font-size: 14px; }
+.ctrl-btn.active { background: #1a2a4a; border-color: #5b7fff; color: #9db4ff; }
+
+/* ── 상대방 녹화 중 표시 ── */
+.remote-rec-banner {
+  margin-left: 10px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #3a1a1a;
+  color: #ff6b6b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 펜·터치로 그릴 때 페이지가 스크롤·확대되지 않도록 */
+#draw-canvas { touch-action: none; }
