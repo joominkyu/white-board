@@ -11,8 +11,14 @@ const FALLBACK_ICE_SERVERS = [
   { urls: 'stun:stun1.l.google.com:19302' }
 ];
 
-// 이 브라우저 탭 고유 ID — 재접속해도 유지되어 내 획 식별에 사용
-const clientId = uid();
+// 얼굴 영상 최대 비트레이트 — 필기는 영상이 아니라 데이터로 동기화되므로 낮춰도 수업 품질 영향이 적고,
+// TURN 중계 비용(트래픽 과금)을 줄임. 음성 포함 약 600kbps
+const VIDEO_MAX_BITRATE = 550_000;
+
+// 내 획 식별용 ID — 입장 시 서버가 알려줌 (봄노트 사용자 ID)
+let clientId = '';
+// 봄노트가 발급한 입장 토큰 (URL #token=...)
+const liveToken = new URLSearchParams(window.location.hash.slice(1)).get('token') || '';
 
 function uid() {
   return (crypto.randomUUID && crypto.randomUUID()) ||
@@ -65,8 +71,7 @@ let myStroke = null; // 그리는 중인 내 자유선 획
 // ── DOM ──
 const lobby        = document.getElementById('lobby');
 const roomEl       = document.getElementById('room');
-const usernameInput = document.getElementById('username-input');
-const roomInput    = document.getElementById('room-input');
+const lobbyInfo    = document.getElementById('lobby-info');
 const joinBtn      = document.getElementById('join-btn');
 const lobbyError   = document.getElementById('lobby-error');
 const roomTitle    = document.getElementById('room-title');
@@ -138,7 +143,6 @@ const webOpenLink = document.getElementById('web-open-link');
 const recordBtn    = document.getElementById('record-btn');
 const recIndicator = document.getElementById('rec-indicator');
 const recTimer     = document.getElementById('rec-timer');
-const copyLinkBtn    = document.getElementById('copy-link-btn');
 const chatToggleBtn  = document.getElementById('chat-toggle-btn');
 const chatCloseBtn   = document.getElementById('chat-close-btn');
 const remoteControls       = document.getElementById('remote-controls');
@@ -158,35 +162,27 @@ const chatSection    = document.querySelector('.chat-section');
    로비
 ════════════════════════════════════════════ */
 
-// URL에 ?room=xxx 이 있으면 방 이름 자동 입력
+// 토큰에 담긴 이름·수업 ID를 화면 표시용으로 읽음 (검증은 서버가 함)
 (function () {
-  const params = new URLSearchParams(window.location.search);
-  const r = params.get('room');
-  if (r) roomInput.value = r;
+  try {
+    // base64url → UTF-8 (한글 이름이 깨지지 않도록 바이트로 디코딩)
+    const bin = atob(liveToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'));
+    const claims = JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
+    myUsername = String(claims.name || '');
+    myRoomId = String(claims.sid || '');
+    lobbyInfo.textContent = `${myUsername}님, 아래 버튼을 눌러 수업에 입장하세요.`;
+  } catch (_) {
+    joinBtn.disabled = true;
+    lobbyInfo.textContent = '봄노트에서 [실시간 수업] 버튼으로 입장해주세요.';
+  }
 })();
 
-// 추측하기 어려운 방 이름 생성
-document.getElementById('random-room-btn').addEventListener('click', () => {
-  const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
-  const bytes = crypto.getRandomValues(new Uint8Array(10));
-  roomInput.value = Array.from(bytes, b => chars[b % chars.length]).join('');
-});
-
-joinBtn.addEventListener('click', joinRoom);
-[usernameInput, roomInput].forEach(el =>
-  el.addEventListener('keydown', e => { if (e.key === 'Enter') joinRoom(); })
-);
-
-function joinRoom() {
-  const username = usernameInput.value.trim();
-  const roomId   = roomInput.value.trim();
-  if (!username) { lobbyError.textContent = '닉네임을 입력하세요.'; return; }
-  if (!roomId)   { lobbyError.textContent = '방 이름을 입력하세요.'; return; }
+// 카메라·소리 재생을 위해 사용자가 버튼을 눌러 입장
+joinBtn.addEventListener('click', () => {
+  if (!liveToken) return;
   lobbyError.textContent = '';
-  myUsername = username;
-  myRoomId = roomId;
   initApp();
-}
+});
 
 async function initApp() {
   try {
@@ -213,18 +209,13 @@ async function initApp() {
   setupSocketEvents();
   // 최초 연결과 재연결 모두 방에 (다시) 입장
   socket.on('connect', () => {
-    socket.emit('join-room', { roomId: myRoomId, username: myUsername, clientId });
+    socket.emit('join-room', { token: liveToken });
   });
 
   lobby.classList.add('hidden');
   roomEl.classList.remove('hidden');
-  roomTitle.textContent = `# ${myRoomId}`;
+  roomTitle.textContent = '봄노트 실시간 수업';
   initCanvasSize();
-
-  // URL에 방 이름 반영 (링크 공유용)
-  const shareUrl = new URL(window.location.href);
-  shareUrl.searchParams.set('room', myRoomId);
-  window.history.replaceState({}, '', shareUrl.toString());
 
   // 입장 후 기기 목록 공유 (방장이 상대방 기기 설정할 수 있도록)
   setTimeout(emitUserDevices, 1000);
@@ -235,7 +226,8 @@ async function initApp() {
 ════════════════════════════════════════════ */
 function setupSocketEvents() {
 
-  socket.on('joined', async ({ users, isHost: host, state }) => {
+  socket.on('joined', async ({ me, users, isHost: host, state }) => {
+    clientId = me;
     if (hasJoined) showSystemMsg('서버에 다시 연결되었습니다.');
     hasJoined = true;
     isHost = host;
@@ -257,6 +249,11 @@ function setupSocketEvents() {
     isHost = true;
     updateHostUI();
     showSystemMsg('방장이 나가서 회원님이 방장이 되었습니다.');
+  });
+
+  socket.on('auth-failed', () => {
+    leaveRoom();
+    lobbyError.textContent = '입장 권한이 없거나 링크가 만료되었습니다. 봄노트에서 다시 입장해주세요.';
   });
 
   socket.on('room-full', () => {
@@ -446,6 +443,21 @@ async function startCall() {
   socket.emit('offer', { offer, to: remoteSocketId });
 }
 
+// TURN 중계를 거쳐 연결됐는지 서버에 알림 (비용 측정용)
+async function reportConnectionType(pc) {
+  try {
+    const stats = await pc.getStats();
+    let pair = null;
+    stats.forEach(s => { if (s.type === 'candidate-pair' && s.state === 'succeeded' && s.nominated) pair = s; });
+    if (!pair) return;
+    let relay = false;
+    stats.forEach(s => {
+      if ((s.id === pair.localCandidateId || s.id === pair.remoteCandidateId) && s.candidateType === 'relay') relay = true;
+    });
+    socket && socket.emit('connection-info', { relay });
+  } catch (_) {}
+}
+
 async function flushPendingCandidates() {
   const list = pendingCandidates;
   pendingCandidates = [];
@@ -463,7 +475,9 @@ async function createPeerConnection() {
   peerConnection = pc;
 
   if (localStream) {
-    localStream.getVideoTracks().forEach(t => peerConnection.addTrack(t, localStream));
+    localStream.getVideoTracks().forEach(t => peerConnection.addTransceiver(t, {
+      direction: 'sendrecv', streams: [localStream], sendEncodings: [{ maxBitrate: VIDEO_MAX_BITRATE }]
+    }));
     if (gainedAudioTrack) peerConnection.addTrack(gainedAudioTrack, localStream);
     else localStream.getAudioTracks().forEach(t => peerConnection.addTrack(t, localStream));
   } else {
@@ -502,6 +516,7 @@ async function createPeerConnection() {
     if (peerConnection !== pc) return;
     const s = pc.connectionState;
     if (s === 'connected') {
+      reportConnectionType(pc);
       waitingOverlay.style.display = 'none';
       statusBadge.textContent = '연결됨';
       statusBadge.className = 'status-badge connected';
@@ -745,31 +760,6 @@ async function emitUserDevices() {
 }
 
 /* ════════════════════════════════════════════
-   링크 복사
-════════════════════════════════════════════ */
-copyLinkBtn.addEventListener('click', async () => {
-  const url = new URL(window.location.href);
-  url.searchParams.set('room', myRoomId);
-  const link = url.toString();
-  try {
-    await navigator.clipboard.writeText(link);
-  } catch (_) {
-    const ta = document.createElement('textarea');
-    ta.value = link;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-  }
-  copyLinkBtn.textContent = '✓ 복사됨!';
-  copyLinkBtn.classList.add('copied');
-  setTimeout(() => {
-    copyLinkBtn.textContent = '🔗 링크 복사';
-    copyLinkBtn.classList.remove('copied');
-  }, 2000);
-});
-
-/* ════════════════════════════════════════════
    나가기
 ════════════════════════════════════════════ */
 leaveBtn.addEventListener('click', leaveRoom);
@@ -797,7 +787,6 @@ function leaveRoom() {
   pdfVersion = null;
   strokes = [];
   myStroke = null;
-  window.history.replaceState({}, '', window.location.pathname);
   roomEl.classList.add('hidden');
   lobby.classList.remove('hidden');
   clearDrawCanvas();

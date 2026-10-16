@@ -3,6 +3,12 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const jwt = require('jsonwebtoken');
+
+// 봄노트 백엔드와 공유하는 비밀값 — 입장 토큰 검증, 사용 시간 보고에 사용
+const LIVE_CLASS_SECRET = process.env.LIVE_CLASS_SECRET;
+const BOMNOTE_API_URL = process.env.BOMNOTE_API_URL;
+if (!LIVE_CLASS_SECRET) console.warn('LIVE_CLASS_SECRET 미설정 — 수업 입장이 모두 거부됩니다.');
 
 const app = express();
 const server = http.createServer(app);
@@ -19,12 +25,45 @@ const MAX_POINTS_PER_STROKE = 5000;
 const ROOM_EXPIRE_MS = 10 * 60 * 1000; // 모두 나간 뒤 방 상태 보관 시간 (재접속 대비)
 
 // rooms: {
-//   roomId: {
-//     users: [{ socketId, username, clientId }], host: socketId,
-//     pdf: { buffer, name, version } | null, pdfPage, strokes: [], webUrl, expireTimer
+//   roomId(봄노트 수업 ID): {
+//     users: [{ socketId, username, uid, role }], host: socketId(선생님),
+//     pdf: { buffer, name, version } | null, pdfPage, strokes: [], webUrl, expireTimer,
+//     pairedSince: 두 사람이 모두 접속한 시각(ms) | null, relayUsed: TURN 경유 여부
 //   }
 // }
 const rooms = {};
+
+// ── 봄노트 백엔드에 보고 ──
+async function notifyBomnote(path, body) {
+  if (!BOMNOTE_API_URL) return;
+  try {
+    const res = await fetch(`${BOMNOTE_API_URL}/api/live/internal/${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Live-Secret': LIVE_CLASS_SECRET },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) throw new Error(`status ${res.status}`);
+  } catch (e) {
+    console.error(`봄노트 보고 실패 (${path}, ${JSON.stringify(body)}):`, e.message);
+  }
+}
+
+// 사용 시간 — 두 사람이 모두 접속해 있던 시간만
+function reportUsage(roomId, seconds, relay) {
+  if (seconds > 0) notifyBomnote('usage', { sessionId: roomId, seconds, relay });
+}
+
+function flushUsage(roomId) {
+  const room = rooms[roomId];
+  if (!room || !room.pairedSince) return;
+  const seconds = Math.floor((Date.now() - room.pairedSince) / 1000);
+  if (seconds <= 0) return;
+  room.pairedSince += seconds * 1000;
+  reportUsage(roomId, seconds, room.relayUsed);
+}
+
+// 서버가 갑자기 꺼져도 최대 1분만 누락되도록 주기적으로 보고
+setInterval(() => Object.keys(rooms).forEach(flushUsage), 60 * 1000);
 
 const isStr = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -75,19 +114,23 @@ function removeUser(roomId, socketId) {
   const room = rooms[roomId];
   if (!room) return;
   const user = room.users.find(u => u.socketId === socketId);
+  if (!user) return;
   room.users = room.users.filter(u => u.socketId !== socketId);
 
-  // 방장이 나가면 남은 사람에게 방장 이전
-  if (room.host === socketId && room.users.length > 0) {
-    room.host = room.users[0].socketId;
-    io.to(room.host).emit('host-transferred');
-  }
+  // 한 명이 나가면 그때까지의 수업 시간 보고
+  if (room.users.length < 2) { flushUsage(roomId); room.pairedSince = null; }
 
-  if (user) io.to(roomId).except(socketId).emit('user-left', { socketId, username: user.username });
+  // 방장은 선생님 고정 — 선생님이 나가면 방장 없음
+  if (room.host === socketId) room.host = null;
+
+  io.to(roomId).except(socketId).emit('user-left', { socketId, username: user.username });
 
   if (room.users.length === 0) {
     room.expireTimer = setTimeout(() => {
-      if (rooms[roomId] && rooms[roomId].users.length === 0) delete rooms[roomId];
+      if (rooms[roomId] && rooms[roomId].users.length === 0) {
+        delete rooms[roomId];
+        notifyBomnote('end', { sessionId: roomId }); // 학생 [수업 입장] 배너 숨김
+      }
     }, ROOM_EXPIRE_MS);
   }
 }
@@ -163,23 +206,31 @@ async function getIceServers() {
 io.on('connection', (socket) => {
   console.log('connected:', socket.id);
 
-  socket.on('join-room', ({ roomId, username, clientId } = {}) => {
-    if (!isStr(roomId, 30) || !isStr(username, 20) || !isStr(clientId, 64)) return;
+  // 봄노트가 발급한 입장 토큰으로만 입장 — { sid: 수업 ID, uid, name, role: 'teacher'|'student' }
+  socket.on('join-room', ({ token } = {}) => {
+    let claims;
+    try {
+      claims = jwt.verify(token, LIVE_CLASS_SECRET);
+    } catch (_) {
+      socket.emit('auth-failed');
+      return;
+    }
+    const roomId = String(claims.sid);
+    const uid = String(claims.uid);
+    const username = String(claims.name).slice(0, 20);
+    const role = claims.role === 'teacher' ? 'teacher' : 'student';
 
     if (!rooms[roomId]) {
-      rooms[roomId] = { users: [], host: null, pdf: null, pdfPage: 1, strokes: [], webUrl: '' };
+      rooms[roomId] = { users: [], host: null, pdf: null, pdfPage: 1, strokes: [], webUrl: '', pairedSince: null, relayUsed: false };
     }
     const room = rooms[roomId];
     clearTimeout(room.expireTimer);
 
-    // 재접속: 같은 clientId의 이전 소켓이 아직 남아 있으면 정리
-    const stale = room.users.find(u => u.clientId === clientId && u.socketId !== socket.id);
+    // 재접속·새 탭: 같은 사람의 이전 소켓이 남아 있으면 정리
+    const stale = room.users.find(u => u.uid === uid && u.socketId !== socket.id);
     if (stale) {
-      const wasHost = room.host === stale.socketId;
-      room.users = room.users.filter(u => u !== stale);
-      if (wasHost) room.host = socket.id;
-      socket.to(roomId).emit('user-left', { socketId: stale.socketId, username: stale.username });
       const staleSocket = io.sockets.sockets.get(stale.socketId);
+      removeUser(roomId, stale.socketId);
       if (staleSocket) { staleSocket.data.roomId = null; staleSocket.disconnect(true); }
     }
 
@@ -188,23 +239,31 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (room.users.length === 0 && !stale) room.host = socket.id;
-    room.users.push({ socketId: socket.id, username, clientId });
+    if (role === 'teacher') room.host = socket.id;
+    room.users.push({ socketId: socket.id, username, uid, role });
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.username = username;
-    socket.data.clientId = clientId;
+    socket.data.clientId = uid; // 획 주인 식별 (재접속해도 같은 사람)
+    if (room.users.length === 2) room.pairedSince = Date.now();
 
     socket.to(roomId).emit('user-joined', { socketId: socket.id, username });
 
     socket.emit('joined', {
       roomId,
+      me: uid,
       users: room.users.map(u => ({ socketId: u.socketId, username: u.username })),
       isHost: room.host === socket.id,
       state: roomStatePayload(room)
     });
 
     console.log(`${username} joined room ${roomId} (host: ${room.host === socket.id}), total: ${room.users.length}`);
+  });
+
+  // 클라이언트가 TURN 경유로 연결됐는지 알려줌 (비용 측정용)
+  socket.on('connection-info', ({ relay } = {}) => {
+    const room = rooms[socket.data.roomId];
+    if (room && relay === true) room.relayUsed = true;
   });
 
   socket.on('get-ice-servers', async (cb) => {
