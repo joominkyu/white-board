@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -6,154 +7,320 @@ const path = require('path');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' },
-  maxHttpBufferSize: 50 * 1024 * 1024 // PDF 전송 50MB 허용
+  cors: { origin: '*' }
+  // PDF는 HTTP로 업로드하므로 소켓 메시지 크기는 기본값(1MB) 사용
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// rooms: { roomId: { users: [{ socketId, username }], host: socketId } }
+const MAX_PDF_BYTES = 50 * 1024 * 1024;
+const MAX_STROKES_PER_ROOM = 10000;
+const MAX_POINTS_PER_STROKE = 5000;
+const ROOM_EXPIRE_MS = 10 * 60 * 1000; // 모두 나간 뒤 방 상태 보관 시간 (재접속 대비)
+
+// rooms: {
+//   roomId: {
+//     users: [{ socketId, username, clientId }], host: socketId,
+//     pdf: { buffer, name, version } | null, pdfPage, strokes: [], webUrl, expireTimer
+//   }
+// }
 const rooms = {};
+
+const isStr = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+
+function cleanPoints(points, max) {
+  if (!Array.isArray(points) || points.length === 0 || points.length > max) return null;
+  if (!points.every(p => Array.isArray(p) && isNum(p[0]) && isNum(p[1]))) return null;
+  return points.map(p => [p[0], p[1]]);
+}
+
+function cleanStroke(s, owner) {
+  if (!s || !isStr(s.id, 64)) return null;
+  if (!['path', 'line', 'shape'].includes(s.kind)) return null;
+  if (!Number.isInteger(s.page) || s.page < 0) return null;
+  if (!isStr(s.color, 20) || !isNum(s.size)) return null;
+  const points = cleanPoints(s.points, MAX_POINTS_PER_STROKE);
+  if (!points) return null;
+  return {
+    id: s.id,
+    owner,
+    page: s.page,
+    kind: s.kind,
+    tool: s.tool === 'eraser' ? 'eraser' : 'pen',
+    shape: ['rect', 'triangle', 'circle'].includes(s.shape) ? s.shape : 'rect',
+    filled: !!s.filled,
+    color: s.color,
+    size: s.size,
+    points
+  };
+}
+
+function roomStatePayload(room) {
+  return {
+    pdf: room.pdf ? { name: room.pdf.name, version: room.pdf.version } : null,
+    pdfPage: room.pdfPage,
+    strokes: room.strokes,
+    webUrl: room.webUrl
+  };
+}
+
+// 같은 방에 있는 상대인지 확인 (시그널링 대상 검증)
+function isRoommate(socket, targetId) {
+  const room = rooms[socket.data.roomId];
+  return !!room && room.users.some(u => u.socketId === targetId);
+}
+
+function removeUser(roomId, socketId) {
+  const room = rooms[roomId];
+  if (!room) return;
+  const user = room.users.find(u => u.socketId === socketId);
+  room.users = room.users.filter(u => u.socketId !== socketId);
+
+  // 방장이 나가면 남은 사람에게 방장 이전
+  if (room.host === socketId && room.users.length > 0) {
+    room.host = room.users[0].socketId;
+    io.to(room.host).emit('host-transferred');
+  }
+
+  if (user) io.to(roomId).except(socketId).emit('user-left', { socketId, username: user.username });
+
+  if (room.users.length === 0) {
+    room.expireTimer = setTimeout(() => {
+      if (rooms[roomId] && rooms[roomId].users.length === 0) delete rooms[roomId];
+    }, ROOM_EXPIRE_MS);
+  }
+}
+
+// ── PDF 업로드/다운로드 ──
+app.post('/rooms/:roomId/pdf', express.raw({ type: 'application/pdf', limit: MAX_PDF_BYTES }), (req, res) => {
+  const roomId = req.params.roomId;
+  const room = rooms[roomId];
+  const uploader = io.sockets.sockets.get(req.get('X-Socket-Id') || '');
+  if (!room || !uploader || uploader.data.roomId !== roomId) return res.status(403).end();
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).end();
+
+  let name = 'document.pdf';
+  try { name = decodeURIComponent(req.get('X-File-Name') || name).slice(0, 200); } catch (_) {}
+
+  const version = Date.now();
+  room.pdf = { buffer: req.body, name, version };
+  room.pdfPage = 1;
+  room.strokes = room.strokes.filter(s => s.page === 0); // 이전 PDF 필기 제거
+  uploader.to(roomId).emit('pdf-updated', { name, version });
+  res.json({ version });
+});
+
+app.get('/rooms/:roomId/pdf', (req, res) => {
+  const room = rooms[req.params.roomId];
+  if (!room || !room.pdf) return res.status(404).end();
+  res.type('application/pdf').send(room.pdf.buffer);
+});
+
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.too.large') return res.status(413).end();
+  next(err);
+});
+
+// ── TURN 자격증명 (Cloudflare) ──
+const FALLBACK_ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  {
+    urls: [
+      'turn:openrelay.metered.ca:80',
+      'turn:openrelay.metered.ca:443',
+      'turn:openrelay.metered.ca:443?transport=tcp'
+    ],
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  }
+];
+
+async function getIceServers() {
+  const keyId = process.env.CLOUDFLARE_TURN_KEY_ID;
+  const token = process.env.CLOUDFLARE_TURN_API_TOKEN;
+  if (!keyId || !token) return FALLBACK_ICE_SERVERS;
+  try {
+    const res = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${keyId}/credentials/generate-ice-servers`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttl: 86400 })
+    });
+    if (!res.ok) throw new Error(`status ${res.status}`);
+    const { iceServers } = await res.json();
+    // 브라우저는 53번 포트를 차단하므로 제외
+    return iceServers.map(s => ({
+      ...s,
+      urls: [].concat(s.urls).filter(u => !/:53(\?|$)/.test(u))
+    }));
+  } catch (e) {
+    console.error('TURN 자격증명 발급 실패:', e.message);
+    return FALLBACK_ICE_SERVERS;
+  }
+}
 
 io.on('connection', (socket) => {
   console.log('connected:', socket.id);
 
-  socket.on('join-room', ({ roomId, username }) => {
+  socket.on('join-room', ({ roomId, username, clientId } = {}) => {
+    if (!isStr(roomId, 30) || !isStr(username, 20) || !isStr(clientId, 64)) return;
+
     if (!rooms[roomId]) {
-      rooms[roomId] = { users: [], host: socket.id };
+      rooms[roomId] = { users: [], host: null, pdf: null, pdfPage: 1, strokes: [], webUrl: '' };
+    }
+    const room = rooms[roomId];
+    clearTimeout(room.expireTimer);
+
+    // 재접속: 같은 clientId의 이전 소켓이 아직 남아 있으면 정리
+    const stale = room.users.find(u => u.clientId === clientId && u.socketId !== socket.id);
+    if (stale) {
+      const wasHost = room.host === stale.socketId;
+      room.users = room.users.filter(u => u !== stale);
+      if (wasHost) room.host = socket.id;
+      socket.to(roomId).emit('user-left', { socketId: stale.socketId, username: stale.username });
+      const staleSocket = io.sockets.sockets.get(stale.socketId);
+      if (staleSocket) { staleSocket.data.roomId = null; staleSocket.disconnect(true); }
     }
 
-    if (rooms[roomId].users.length >= 2) {
+    if (room.users.length >= 2) {
       socket.emit('room-full');
       return;
     }
 
-    const isHost = rooms[roomId].host === socket.id;
-    rooms[roomId].users.push({ socketId: socket.id, username });
+    if (room.users.length === 0 && !stale) room.host = socket.id;
+    room.users.push({ socketId: socket.id, username, clientId });
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.username = username;
+    socket.data.clientId = clientId;
 
-    const others = rooms[roomId].users.filter(u => u.socketId !== socket.id);
-
-    if (others.length > 0) {
-      socket.to(roomId).emit('user-joined', { socketId: socket.id, username });
-    }
+    socket.to(roomId).emit('user-joined', { socketId: socket.id, username });
 
     socket.emit('joined', {
       roomId,
-      users: rooms[roomId].users,
-      isHost,
-      hostSocketId: rooms[roomId].host
+      users: room.users.map(u => ({ socketId: u.socketId, username: u.username })),
+      isHost: room.host === socket.id,
+      state: roomStatePayload(room)
     });
 
-    console.log(`${username} joined room ${roomId} (host: ${isHost}), total: ${rooms[roomId].users.length}`);
+    console.log(`${username} joined room ${roomId} (host: ${room.host === socket.id}), total: ${room.users.length}`);
   });
 
-  // ── WebRTC 시그널링 ──
-  socket.on('offer', ({ offer, to }) => {
+  socket.on('get-ice-servers', async (cb) => {
+    if (typeof cb !== 'function' || !socket.data.roomId) return;
+    cb(await getIceServers());
+  });
+
+  // ── WebRTC 시그널링 (같은 방 상대에게만) ──
+  socket.on('offer', ({ offer, to } = {}) => {
+    if (!isRoommate(socket, to)) return;
     io.to(to).emit('offer', { offer, from: socket.id, username: socket.data.username });
   });
-  socket.on('answer', ({ answer, to }) => {
+  socket.on('answer', ({ answer, to } = {}) => {
+    if (!isRoommate(socket, to)) return;
     io.to(to).emit('answer', { answer, from: socket.id });
   });
-  socket.on('ice-candidate', ({ candidate, to }) => {
+  socket.on('ice-candidate', ({ candidate, to } = {}) => {
+    if (!isRoommate(socket, to)) return;
     io.to(to).emit('ice-candidate', { candidate, from: socket.id });
   });
 
   // ── 텍스트 채팅 ──
   socket.on('chat-message', (message) => {
     const roomId = socket.data.roomId;
-    if (!roomId) return;
+    if (!roomId || !isStr(message, 300)) return;
     io.to(roomId).emit('chat-message', {
       username: socket.data.username,
       message,
-      time: new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
+      time: new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Seoul' })
     });
   });
 
-  // ── 화이트보드 드로잉 동기화 ──
-  socket.on('draw-start', (data) => socket.to(socket.data.roomId).emit('draw-start', data));
-  socket.on('draw-move', (data) => socket.to(socket.data.roomId).emit('draw-move', data));
-  socket.on('draw-end', () => socket.to(socket.data.roomId).emit('draw-end'));
-  socket.on('draw-shape', (data) => socket.to(socket.data.roomId).emit('draw-shape', data));
-  socket.on('draw-line',  (data) => socket.to(socket.data.roomId).emit('draw-line',  data));
+  // ── 화이트보드: 획 단위 동기화 ──
+  socket.on('stroke-start', (data) => {
+    const room = rooms[socket.data.roomId];
+    if (!room || room.strokes.length >= MAX_STROKES_PER_ROOM) return;
+    const stroke = cleanStroke(data, socket.data.clientId);
+    if (!stroke || room.strokes.some(s => s.id === stroke.id)) return;
+    room.strokes.push(stroke);
+    socket.to(socket.data.roomId).emit('stroke-start', stroke);
+  });
+
+  socket.on('stroke-points', ({ id, points } = {}) => {
+    const room = rooms[socket.data.roomId];
+    if (!room) return;
+    const stroke = room.strokes.findLast(s => s.id === id);
+    if (!stroke || stroke.owner !== socket.data.clientId) return;
+    const clean = cleanPoints(points, MAX_POINTS_PER_STROKE - stroke.points.length);
+    if (!clean) return;
+    stroke.points.push(...clean);
+    socket.to(socket.data.roomId).emit('stroke-points', { id, points: clean });
+  });
+
+  socket.on('stroke-undo', (id) => {
+    const room = rooms[socket.data.roomId];
+    if (!room) return;
+    const idx = room.strokes.findIndex(s => s.id === id && s.owner === socket.data.clientId);
+    if (idx === -1) return;
+    room.strokes.splice(idx, 1);
+    socket.to(socket.data.roomId).emit('stroke-removed', id);
+  });
+
+  // 현재 페이지 전체 지우기 — 방장만 허용
+  socket.on('board-clear', (page) => {
+    const room = rooms[socket.data.roomId];
+    if (!room || room.host !== socket.id || !Number.isInteger(page)) return;
+    room.strokes = room.strokes.filter(s => s.page !== page);
+    socket.to(socket.data.roomId).emit('board-cleared', page);
+  });
 
   // 기기 목록 공유 (비방장 → 방장에게만 전달)
   socket.on('user-devices', (devices) => {
-    const roomId = socket.data.roomId;
-    if (!roomId || !rooms[roomId]) return;
-    const hostId = rooms[roomId].host;
-    if (hostId !== socket.id) {
-      io.to(hostId).emit('remote-devices', devices);
-    }
+    const room = rooms[socket.data.roomId];
+    if (!room || room.host === socket.id) return;
+    io.to(room.host).emit('remote-devices', devices);
   });
 
   // 기기 목록 요청 (방장 → 상대방에게 요청)
   socket.on('request-user-devices', () => {
-    const roomId = socket.data.roomId;
-    if (!roomId || !rooms[roomId]) return;
-    if (rooms[roomId].host !== socket.id) return;
-    socket.to(roomId).emit('devices-requested');
+    const room = rooms[socket.data.roomId];
+    if (!room || room.host !== socket.id) return;
+    socket.to(socket.data.roomId).emit('devices-requested');
   });
 
   // 방장이 상대방 기기 전환 명령
   socket.on('host-switch-device', (data) => {
-    const roomId = socket.data.roomId;
-    if (!roomId || !rooms[roomId]) return;
-    if (rooms[roomId].host !== socket.id) return;
-    socket.to(roomId).emit('host-switch-device', data);
+    const room = rooms[socket.data.roomId];
+    if (!room || room.host !== socket.id) return;
+    socket.to(socket.data.roomId).emit('host-switch-device', data);
   });
 
   // 방장이 상대방 마이크 제어
-  socket.on('host-control-mic', ({ muted }) => {
-    const roomId = socket.data.roomId;
-    if (!roomId || !rooms[roomId]) return;
-    if (rooms[roomId].host !== socket.id) return;
-    socket.to(roomId).emit('host-control-mic', { muted });
+  socket.on('host-control-mic', ({ muted } = {}) => {
+    const room = rooms[socket.data.roomId];
+    if (!room || room.host !== socket.id) return;
+    socket.to(socket.data.roomId).emit('host-control-mic', { muted: !!muted });
   });
-
-  // 전체 지우기 — 방장만 허용
-  socket.on('whiteboard-clear', () => {
-    const roomId = socket.data.roomId;
-    if (!roomId || !rooms[roomId]) return;
-    if (rooms[roomId].host !== socket.id) return;
-    socket.to(roomId).emit('whiteboard-clear');
-  });
-
-  socket.on('whiteboard-undo', (imageData) => socket.to(socket.data.roomId).emit('whiteboard-undo', imageData));
 
   // 웹 공유
-  socket.on('web-navigate', (url) => socket.to(socket.data.roomId).emit('web-navigate', url));
-  socket.on('request-web-url', (targetId) => io.to(targetId).emit('web-url-request', socket.id));
-  socket.on('web-url-response', ({ to, url }) => io.to(to).emit('web-url-response', url));
-
-  // ── PDF 공유 (base64 relay) ──
-  socket.on('pdf-upload', (data) => socket.to(socket.data.roomId).emit('pdf-upload', data));
-  socket.on('pdf-page-change', (page) => socket.to(socket.data.roomId).emit('pdf-page-change', page));
-
-  // ── 화이트보드 상태 동기화 (신규 입장자 요청) ──
-  socket.on('request-board-state', (targetSocketId) => {
-    io.to(targetSocketId).emit('board-state-request', socket.id);
+  socket.on('web-navigate', (url) => {
+    const room = rooms[socket.data.roomId];
+    if (!room || !isStr(url, 2000) || !/^https?:\/\//i.test(url)) return;
+    room.webUrl = url;
+    socket.to(socket.data.roomId).emit('web-navigate', url);
   });
-  socket.on('board-state-response', ({ to, imageData, pdfPage }) => {
-    io.to(to).emit('board-state-response', { imageData, pdfPage });
+
+  // ── PDF 페이지 동기화 ──
+  socket.on('pdf-page-change', (page) => {
+    const room = rooms[socket.data.roomId];
+    if (!room || !room.pdf || !Number.isInteger(page) || page < 1) return;
+    room.pdfPage = page;
+    socket.to(socket.data.roomId).emit('pdf-page-change', page);
   });
 
   socket.on('disconnect', () => {
-    const roomId = socket.data.roomId;
-    if (roomId && rooms[roomId]) {
-      rooms[roomId].users = rooms[roomId].users.filter(u => u.socketId !== socket.id);
-
-      // 방장이 나가면 남은 사람에게 방장 이전
-      if (rooms[roomId].host === socket.id && rooms[roomId].users.length > 0) {
-        rooms[roomId].host = rooms[roomId].users[0].socketId;
-        io.to(rooms[roomId].host).emit('host-transferred');
-      }
-
-      socket.to(roomId).emit('user-left', { socketId: socket.id, username: socket.data.username });
-      if (rooms[roomId].users.length === 0) delete rooms[roomId];
-    }
+    if (socket.data.roomId) removeUser(socket.data.roomId, socket.id);
     console.log('disconnected:', socket.id);
   });
 });
