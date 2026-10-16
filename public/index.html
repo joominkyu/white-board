@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <title>화상 화이트보드</title>
-  <link rel="stylesheet" href="style.css?v=4" />
+  <link rel="stylesheet" href="style.css?v=5" />
 </head>
 <body>
 
@@ -13,11 +13,9 @@
     <div class="lobby-box">
       <div class="lobby-icon">🎥</div>
       <h1>화상 화이트보드</h1>
-      <p class="subtitle">2명이 함께하는 화상통화 + 화이트보드</p>
-      <input id="username-input" type="text" placeholder="닉네임" maxlength="20" />
-      <input id="room-input" type="text" placeholder="방 이름 (같은 방 이름으로 입장)" maxlength="30" />
-      <button id="random-room-btn" type="button" class="random-room-btn">🎲 랜덤 방 이름 만들기</button>
-      <button id="join-btn">입장하기</button>
+      <p class="subtitle">봄노트 실시간 수업</p>
+      <p id="lobby-info" class="lobby-info"></p>
+      <button id="join-btn">수업 입장</button>
       <p id="lobby-error" class="error-msg"></p>
     </div>
   </div>
@@ -34,7 +32,6 @@
       <div class="header-right">
         <span id="connection-status" class="status-badge waiting">대기 중</span>
         <button id="chat-toggle-btn" class="chat-toggle-btn">💬</button>
-        <button id="copy-link-btn" class="copy-link-btn">🔗 링크 복사</button>
         <button id="record-btn" class="record-btn">⏺ 녹화</button>
         <div id="rec-indicator" class="rec-indicator hidden">
           <span class="rec-dot"></span>
@@ -280,6 +277,6 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-  <script src="client.js?v=4"></script>
+  <script src="client.js?v=5"></script>
 </body>
 </html>

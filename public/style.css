@@ -85,17 +85,13 @@ body {
 #join-btn:hover { opacity: 0.9; transform: translateY(-1px); }
 #join-btn:active { transform: translateY(0); }
 
-.random-room-btn {
-  background: none;
-  border: none;
-  color: #8892a4;
-  font-size: 12px;
-  cursor: pointer;
-  align-self: flex-end;
-  padding: 0;
-  margin-top: -4px;
+.lobby-info {
+  color: #c5cde0;
+  font-size: 14px;
+  text-align: center;
+  line-height: 1.6;
 }
-.random-room-btn:hover { color: #c5cde0; }
+#join-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
 .error-msg {
   color: #ff6b6b;
