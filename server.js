@@ -28,16 +28,22 @@ const ROOM_EXPIRE_MS = 10 * 60 * 1000; // 모두 나간 뒤 방 상태 보관 �
 //   roomId(봄노트 수업 ID): {
 //     users: [{ socketId, username, uid, role }], host: socketId(선생님),
 //     pdf: { buffer, name, version } | null, pdfPage, strokes: [], webUrl, expireTimer,
-//     pairedSince: 두 사람이 모두 접속한 시각(ms) | null, relayUsed: TURN 경유 여부
+//     pairedSince: 두 사람이 모두 접속한 시각(ms) | null, relayUsed: TURN 경유 여부,
+//     ready: 봄노트에서 저장된 필기를 불러오는 Promise, dirty: 저장 안 된 변경 있음
 //   }
 // }
 const rooms = {};
+const BOARD_SAVE_INTERVAL_MS = 10 * 1000;
 
 // ── 봄노트 백엔드에 보고 ──
+function bomnoteUrl(path) {
+  return `${BOMNOTE_API_URL}/api/live/internal/${path}`;
+}
+
 async function notifyBomnote(path, body) {
   if (!BOMNOTE_API_URL) return;
   try {
-    const res = await fetch(`${BOMNOTE_API_URL}/api/live/internal/${path}`, {
+    const res = await fetch(bomnoteUrl(path), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Live-Secret': LIVE_CLASS_SECRET },
       body: JSON.stringify(body)
@@ -49,18 +55,81 @@ async function notifyBomnote(path, body) {
 }
 
 // 사용 시간 — 두 사람이 모두 접속해 있던 시간만
-function reportUsage(roomId, seconds, relay) {
-  if (seconds > 0) notifyBomnote('usage', { sessionId: roomId, seconds, relay });
-}
-
 function flushUsage(roomId) {
   const room = rooms[roomId];
   if (!room || !room.pairedSince) return;
   const seconds = Math.floor((Date.now() - room.pairedSince) / 1000);
   if (seconds <= 0) return;
   room.pairedSince += seconds * 1000;
-  reportUsage(roomId, seconds, room.relayUsed);
+  return notifyBomnote('usage', { sessionId: roomId, seconds, relay: room.relayUsed });
 }
+
+// ── 필기·PDF 저장/불러오기 (봄노트가 DB·R2에 보관) ──
+async function fetchBoard(roomId) {
+  const res = await fetch(bomnoteUrl(`sessions/${encodeURIComponent(roomId)}/board`), {
+    headers: { 'X-Live-Secret': LIVE_CLASS_SECRET }
+  });
+  if (!res.ok) throw new Error(`status ${res.status}`);
+  return res.json(); // { board: { strokes, webUrl } | null, pdfPage, pdf: { name, url } | null }
+}
+
+async function downloadPdf(pdf) {
+  const res = await fetch(new URL(pdf.url, BOMNOTE_API_URL));
+  if (!res.ok) throw new Error(`PDF status ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function loadRoomState(roomId, room) {
+  if (!BOMNOTE_API_URL) return;
+  try {
+    const data = await fetchBoard(roomId);
+    room.strokes = data.board?.strokes ?? [];
+    room.webUrl = data.board?.webUrl ?? '';
+    room.pdfPage = data.pdfPage ?? 1;
+    if (data.pdf) room.pdf = { buffer: await downloadPdf(data.pdf), name: data.pdf.name, version: Date.now() };
+  } catch (e) {
+    console.error(`필기 불러오기 실패 (room ${roomId}):`, e.message);
+  }
+}
+
+async function saveBoard(roomId, room) {
+  if (!BOMNOTE_API_URL) return;
+  room.dirty = false;
+  try {
+    const res = await fetch(bomnoteUrl(`sessions/${encodeURIComponent(roomId)}/board`), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Live-Secret': LIVE_CLASS_SECRET },
+      body: JSON.stringify({ strokes: room.strokes, webUrl: room.webUrl, pdfPage: room.pdfPage })
+    });
+    if (!res.ok) throw new Error(`status ${res.status}`);
+  } catch (e) {
+    room.dirty = true; // 다음 주기에 다시 시도
+    console.error(`필기 저장 실패 (room ${roomId}):`, e.message);
+  }
+}
+
+function getOrCreateRoom(roomId) {
+  if (!rooms[roomId]) {
+    const room = { users: [], host: null, pdf: null, pdfPage: 1, strokes: [], webUrl: '', pairedSince: null, relayUsed: false, dirty: false };
+    room.ready = loadRoomState(roomId, room);
+    rooms[roomId] = room;
+  }
+  return rooms[roomId];
+}
+
+const markDirty = (room) => { room.dirty = true; };
+
+setInterval(() => {
+  for (const [roomId, room] of Object.entries(rooms)) if (room.dirty) saveBoard(roomId, room);
+}, BOARD_SAVE_INTERVAL_MS);
+
+// 재배포·재시작 시 (Railway는 SIGTERM) 저장 안 된 필기와 사용 시간을 보내고 종료
+process.on('SIGTERM', async () => {
+  await Promise.all(Object.entries(rooms).map(([roomId, room]) =>
+    Promise.all([flushUsage(roomId), room.dirty ? saveBoard(roomId, room) : null])
+  ));
+  process.exit(0);
+});
 
 // 서버가 갑자기 꺼져도 최대 1분만 누락되도록 주기적으로 보고
 setInterval(() => Object.keys(rooms).forEach(flushUsage), 60 * 1000);
@@ -126,11 +195,12 @@ function removeUser(roomId, socketId) {
   io.to(roomId).except(socketId).emit('user-left', { socketId, username: user.username });
 
   if (room.users.length === 0) {
-    room.expireTimer = setTimeout(() => {
-      if (rooms[roomId] && rooms[roomId].users.length === 0) {
-        delete rooms[roomId];
-        notifyBomnote('end', { sessionId: roomId }); // 학생 [수업 입장] 배너 숨김
-      }
+    room.expireTimer = setTimeout(async () => {
+      if (rooms[roomId] !== room || room.users.length > 0) return;
+      if (room.dirty) await saveBoard(roomId, room);
+      if (rooms[roomId] !== room || room.users.length > 0) return; // 저장하는 사이 다시 입장함
+      delete rooms[roomId];
+      notifyBomnote('end', { sessionId: roomId }); // 학생 [수업 입장] 배너 숨김
     }, ROOM_EXPIRE_MS);
   }
 }
@@ -150,14 +220,69 @@ app.post('/rooms/:roomId/pdf', express.raw({ type: 'application/pdf', limit: MAX
   room.pdf = { buffer: req.body, name, version };
   room.pdfPage = 1;
   room.strokes = room.strokes.filter(s => s.page === 0); // 이전 PDF 필기 제거
+  markDirty(room);
   uploader.to(roomId).emit('pdf-updated', { name, version });
   res.json({ version });
+
+  // 봄노트에 보관 (수업은 메모리의 PDF로 계속 진행되므로 기다리지 않음)
+  if (BOMNOTE_API_URL) {
+    fetch(bomnoteUrl(`sessions/${encodeURIComponent(roomId)}/pdf`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/pdf', 'X-Live-Secret': LIVE_CLASS_SECRET, 'X-File-Name': encodeURIComponent(name) },
+      body: req.body
+    }).then(r => { if (!r.ok) throw new Error(`status ${r.status}`); })
+      .catch(e => console.error(`PDF 보관 실패 (room ${roomId}):`, e.message));
+  }
 });
 
 app.get('/rooms/:roomId/pdf', (req, res) => {
   const room = rooms[req.params.roomId];
   if (!room || !room.pdf) return res.status(404).end();
   res.type('application/pdf').send(room.pdf.buffer);
+});
+
+// ── 지난 수업 보기 전용 (봄노트가 발급한 review 토큰, Authorization 헤더) ──
+function reviewRoomId(req) {
+  try {
+    const claims = jwt.verify((req.get('Authorization') || '').replace(/^Bearer /, ''), LIVE_CLASS_SECRET);
+    return claims.role === 'review' ? String(claims.sid) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+app.get('/review/state', async (req, res) => {
+  const roomId = reviewRoomId(req);
+  if (!roomId) return res.status(401).end();
+  try {
+    // 수업이 진행 중이면 메모리의 최신 상태, 아니면 봄노트에 저장된 상태
+    const room = rooms[roomId];
+    if (room) {
+      await room.ready;
+      return res.json({ strokes: room.strokes, pdfPage: room.pdfPage, pdf: room.pdf ? { name: room.pdf.name } : null });
+    }
+    const data = await fetchBoard(roomId);
+    res.json({ strokes: data.board?.strokes ?? [], pdfPage: data.pdfPage ?? 1, pdf: data.pdf ? { name: data.pdf.name } : null });
+  } catch (e) {
+    console.error(`다시 보기 불러오기 실패 (room ${roomId}):`, e.message);
+    res.status(502).end();
+  }
+});
+
+app.get('/review/pdf', async (req, res) => {
+  const roomId = reviewRoomId(req);
+  if (!roomId) return res.status(401).end();
+  try {
+    const room = rooms[roomId];
+    if (room) await room.ready;
+    if (room?.pdf) return res.type('application/pdf').send(room.pdf.buffer);
+    const data = await fetchBoard(roomId);
+    if (!data.pdf) return res.status(404).end();
+    res.type('application/pdf').send(await downloadPdf(data.pdf));
+  } catch (e) {
+    console.error(`다시 보기 PDF 실패 (room ${roomId}):`, e.message);
+    res.status(502).end();
+  }
 });
 
 app.use((err, req, res, next) => {
@@ -207,7 +332,7 @@ io.on('connection', (socket) => {
   console.log('connected:', socket.id);
 
   // 봄노트가 발급한 입장 토큰으로만 입장 — { sid: 수업 ID, uid, name, role: 'teacher'|'student' }
-  socket.on('join-room', ({ token } = {}) => {
+  socket.on('join-room', async ({ token } = {}) => {
     let claims;
     try {
       claims = jwt.verify(token, LIVE_CLASS_SECRET);
@@ -218,13 +343,13 @@ io.on('connection', (socket) => {
     const roomId = String(claims.sid);
     const uid = String(claims.uid);
     const username = String(claims.name).slice(0, 20);
+    if (claims.role === 'review') { socket.emit('auth-failed'); return; } // 보기 전용 토큰으로는 수업 입장 불가
     const role = claims.role === 'teacher' ? 'teacher' : 'student';
 
-    if (!rooms[roomId]) {
-      rooms[roomId] = { users: [], host: null, pdf: null, pdfPage: 1, strokes: [], webUrl: '', pairedSince: null, relayUsed: false };
-    }
-    const room = rooms[roomId];
+    const room = getOrCreateRoom(roomId);
     clearTimeout(room.expireTimer);
+    await room.ready; // 저장된 필기·PDF 불러오기 (서버 재시작 후 첫 입장)
+    if (!socket.connected) return;
 
     // 재접속·새 탭: 같은 사람의 이전 소켓이 남아 있으면 정리
     const stale = room.users.find(u => u.uid === uid && u.socketId !== socket.id);
@@ -303,6 +428,7 @@ io.on('connection', (socket) => {
     const stroke = cleanStroke(data, socket.data.clientId);
     if (!stroke || room.strokes.some(s => s.id === stroke.id)) return;
     room.strokes.push(stroke);
+    markDirty(room);
     socket.to(socket.data.roomId).emit('stroke-start', stroke);
   });
 
@@ -314,6 +440,7 @@ io.on('connection', (socket) => {
     const clean = cleanPoints(points, MAX_POINTS_PER_STROKE - stroke.points.length);
     if (!clean) return;
     stroke.points.push(...clean);
+    markDirty(room);
     socket.to(socket.data.roomId).emit('stroke-points', { id, points: clean });
   });
 
@@ -323,6 +450,7 @@ io.on('connection', (socket) => {
     const idx = room.strokes.findIndex(s => s.id === id && s.owner === socket.data.clientId);
     if (idx === -1) return;
     room.strokes.splice(idx, 1);
+    markDirty(room);
     socket.to(socket.data.roomId).emit('stroke-removed', id);
   });
 
@@ -331,6 +459,7 @@ io.on('connection', (socket) => {
     const room = rooms[socket.data.roomId];
     if (!room || room.host !== socket.id || !Number.isInteger(page)) return;
     room.strokes = room.strokes.filter(s => s.page !== page);
+    markDirty(room);
     socket.to(socket.data.roomId).emit('board-cleared', page);
   });
 
@@ -367,6 +496,7 @@ io.on('connection', (socket) => {
     const room = rooms[socket.data.roomId];
     if (!room || !isStr(url, 2000) || !/^https?:\/\//i.test(url)) return;
     room.webUrl = url;
+    markDirty(room);
     socket.to(socket.data.roomId).emit('web-navigate', url);
   });
 
@@ -375,6 +505,7 @@ io.on('connection', (socket) => {
     const room = rooms[socket.data.roomId];
     if (!room || !room.pdf || !Number.isInteger(page) || page < 1) return;
     room.pdfPage = page;
+    markDirty(room);
     socket.to(socket.data.roomId).emit('pdf-page-change', page);
   });
 
