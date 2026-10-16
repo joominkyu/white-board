@@ -1171,3 +1171,16 @@ body {
   /* 설정 모달 */
   .settings-box { width: calc(100vw - 32px); }
 }
+
+/* ── 지난 수업 다시 보기 (보기 전용) ── */
+.export-pdf-btn { display: none; }
+.review-mode .export-pdf-btn { display: inline-block; }
+.review-mode .video-panel,
+.review-mode #connection-status,
+.review-mode #chat-toggle-btn,
+.review-mode #record-btn,
+.review-mode #rec-indicator,
+.review-mode #leave-btn,
+.review-mode .mode-bar,
+.review-mode .toolbar .tool-group:not(.pdf-nav) { display: none !important; }
+.review-mode #draw-canvas { cursor: default !important; }

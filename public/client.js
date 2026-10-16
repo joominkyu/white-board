@@ -19,6 +19,8 @@ const VIDEO_MAX_BITRATE = 550_000;
 let clientId = '';
 // 봄노트가 발급한 입장 토큰 (URL #token=...)
 const liveToken = new URLSearchParams(window.location.hash.slice(1)).get('token') || '';
+// 지난 수업 다시 보기 (영상·채팅·그리기 없이 필기만)
+let reviewMode = false;
 
 function uid() {
   return (crypto.randomUUID && crypto.randomUUID()) ||
@@ -170,7 +172,11 @@ const chatSection    = document.querySelector('.chat-section');
     const claims = JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
     myUsername = String(claims.name || '');
     myRoomId = String(claims.sid || '');
-    lobbyInfo.textContent = `${myUsername}님, 아래 버튼을 눌러 수업에 입장하세요.`;
+    reviewMode = claims.role === 'review';
+    lobbyInfo.textContent = reviewMode
+      ? '지난 수업 필기를 불러오는 중...'
+      : `${myUsername}님, 아래 버튼을 눌러 수업에 입장하세요.`;
+    if (reviewMode) joinBtn.classList.add('hidden');
   } catch (_) {
     joinBtn.disabled = true;
     lobbyInfo.textContent = '봄노트에서 [실시간 수업] 버튼으로 입장해주세요.';
@@ -845,9 +851,10 @@ const toPx = ([x, y]) => [x * drawCanvas.width, y * drawCanvas.height];
 // 슬라이더 굵기(줌 100% 기준 px) → 캔버스 너비 대비 비율
 const normSize = () => strokeSize * canvasZoom / drawCanvas.width;
 
-function drawStroke(ctx, s) {
-  const pts = s.points.map(toPx);
-  const size = s.size * drawCanvas.width;
+// W·H: 그릴 캔버스 크기 (기본은 화면 캔버스, PDF 내보내기 때는 페이지 이미지 크기)
+function drawStroke(ctx, s, W = drawCanvas.width, H = drawCanvas.height) {
+  const pts = s.points.map(([x, y]) => [x * W, y * H]);
+  const size = s.size * W;
   if (s.kind === 'shape') {
     renderShape(ctx, s.shape, pts[0][0], pts[0][1], pts[1][0], pts[1][1], s.color, size, s.filled);
     return;
@@ -901,6 +908,7 @@ function snapEnd(x, y) {
 }
 
 drawCanvas.addEventListener('mousedown', e => {
+  if (reviewMode) return;
   isDrawing = true;
   const { x, y } = getPos(e);
   lastX = x; lastY = y;
@@ -1234,6 +1242,7 @@ function clearDrawCanvas() {
 
 // 현재 페이지에서 내가 마지막으로 그린 획만 취소 (상대 획은 유지)
 function undo() {
+  if (reviewMode) return;
   const page = currentPageKey();
   const mine = strokes.findLast(s => s.owner === clientId && s.page === page);
   if (!mine) return;
@@ -1648,3 +1657,110 @@ window.addEventListener('keydown', e => {
   if (e.key === 'p' || e.key === 'P') toolPen.click();
   if (e.key === 'e' || e.key === 'E') toolEraser.click();
 });
+
+/* ════════════════════════════════════════════
+   지난 수업 다시 보기 (보기 전용) + PDF로 저장
+════════════════════════════════════════════ */
+const exportPdfBtn = document.getElementById('export-pdf-btn');
+
+async function initReview() {
+  const headers = { Authorization: `Bearer ${liveToken}` };
+  try {
+    const res = await fetch('/review/state', { headers });
+    if (!res.ok) throw new Error(`status ${res.status}`);
+    const state = await res.json();
+
+    document.body.classList.add('review-mode');
+    lobby.classList.add('hidden');
+    roomEl.classList.remove('hidden');
+    roomTitle.textContent = '지난 수업 다시 보기';
+    initCanvasSize();
+    strokes = state.strokes;
+
+    if (state.pdf) {
+      const pdfRes = await fetch('/review/pdf', { headers });
+      if (!pdfRes.ok) throw new Error(`PDF status ${pdfRes.status}`);
+      await loadPdfData(new Uint8Array(await pdfRes.arrayBuffer()), 'review');
+      await renderPdfPage(1);
+    } else {
+      redrawBoard();
+    }
+  } catch (err) {
+    console.error('다시 보기 실패:', err);
+    lobbyInfo.textContent = '';
+    lobbyError.textContent = '보관 기간이 지났거나 볼 수 없는 수업입니다. 봄노트에서 다시 열어주세요.';
+  }
+}
+
+let jsPdfLoading = null;
+function loadJsPdf() {
+  if (!jsPdfLoading) {
+    jsPdfLoading = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+      script.onload = () => resolve(window.jspdf.jsPDF);
+      script.onerror = () => { jsPdfLoading = null; reject(new Error('jsPDF 로드 실패')); };
+      document.head.appendChild(script);
+    });
+  }
+  return jsPdfLoading;
+}
+
+// 배경(PDF 페이지 또는 흰 바탕) 위에 해당 페이지 필기를 합친 이미지
+function composePage(background, W, H, page) {
+  const out = document.createElement('canvas');
+  out.width = W; out.height = H;
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+  if (background) ctx.drawImage(background, 0, 0);
+  // 지우개(destination-out)가 배경까지 지우지 않도록 필기는 별도 레이어에 그림
+  const layer = document.createElement('canvas');
+  layer.width = W; layer.height = H;
+  const lctx = layer.getContext('2d');
+  strokes.forEach(s => { if (s.page === page) drawStroke(lctx, s, W, H); });
+  ctx.drawImage(layer, 0, 0);
+  return out;
+}
+
+async function exportPdf() {
+  exportPdfBtn.disabled = true;
+  exportPdfBtn.textContent = '만드는 중...';
+  try {
+    const JsPDF = await loadJsPdf();
+    let doc = null;
+    const addPage = (canvas) => {
+      const w = canvas.width, h = canvas.height;
+      const orientation = w > h ? 'l' : 'p';
+      if (!doc) doc = new JsPDF({ orientation, unit: 'pt', format: [w, h] });
+      else doc.addPage([w, h], orientation);
+      doc.addImage(canvas.toDataURL('image/jpeg', 0.85), 'JPEG', 0, 0, w, h);
+    };
+
+    // PDF 없이 빈 보드에 쓴 필기가 있으면 첫 장
+    if (strokes.some(s => s.page === 0)) addPage(composePage(null, 1600, 900, 0));
+    if (pdfDoc) {
+      for (let i = 1; i <= pdfTotalPages; i++) {
+        const page = await pdfDoc.getPage(i);
+        const viewport = page.getViewport({ scale: 1.5 });
+        const bg = document.createElement('canvas');
+        bg.width = Math.floor(viewport.width); bg.height = Math.floor(viewport.height);
+        await page.render({ canvasContext: bg.getContext('2d'), viewport }).promise;
+        addPage(composePage(bg, bg.width, bg.height, i));
+      }
+    }
+
+    if (!doc) { alert('저장할 필기가 없습니다.'); return; }
+    doc.save(`수업필기_${new Date().toLocaleDateString('sv-SE')}.pdf`);
+  } catch (err) {
+    console.error('PDF 저장 실패:', err);
+    alert('PDF를 만들지 못했습니다. 다시 시도해주세요.');
+  } finally {
+    exportPdfBtn.disabled = false;
+    exportPdfBtn.textContent = '📄 PDF로 저장';
+  }
+}
+
+exportPdfBtn.addEventListener('click', exportPdf);
+
+if (reviewMode) initReview();

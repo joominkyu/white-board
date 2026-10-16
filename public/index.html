@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <title>화상 화이트보드</title>
-  <link rel="stylesheet" href="style.css?v=5" />
+  <link rel="stylesheet" href="style.css?v=6" />
 </head>
 <body>
 
@@ -32,6 +32,7 @@
       <div class="header-right">
         <span id="connection-status" class="status-badge waiting">대기 중</span>
         <button id="chat-toggle-btn" class="chat-toggle-btn">💬</button>
+        <button id="export-pdf-btn" class="record-btn export-pdf-btn">📄 PDF로 저장</button>
         <button id="record-btn" class="record-btn">⏺ 녹화</button>
         <div id="rec-indicator" class="rec-indicator hidden">
           <span class="rec-dot"></span>
@@ -277,6 +278,6 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-  <script src="client.js?v=5"></script>
+  <script src="client.js?v=6"></script>
 </body>
 </html>
