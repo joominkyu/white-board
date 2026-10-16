@@ -1,5 +1,5 @@
 /* ────────────────────────────────────────────
-   화상 화이트보드 클라이언트
+   봄노트 실시간 수업 클라이언트
 ──────────────────────────────────────────── */
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -21,6 +21,9 @@ let remoteSharing = false;  // 상대가 화면 공유 중
 
 // 내 획 식별용 ID — 입장 시 서버가 알려줌 (봄노트 사용자 ID)
 let clientId = '';
+// 아이콘 (index.html의 스프라이트 참조)
+const ic = (name) => `<svg class="ic"><use href="#i-${name}"/></svg>`;
+
 // 봄노트가 발급한 입장 토큰 (URL #token=...)
 const liveToken = new URLSearchParams(window.location.hash.slice(1)).get('token') || '';
 // 지난 수업 다시 보기 (영상·채팅·그리기 없이 필기만)
@@ -202,7 +205,7 @@ async function initApp() {
     const nocam = document.createElement('div');
     nocam.className = 'nocam-overlay';
     nocam.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:4px;background:#0a0c14;color:#8892a4;font-size:11px;text-align:center;padding:8px;z-index:1;';
-    nocam.innerHTML = '<span style="font-size:20px">📵</span><span>카메라/마이크<br>권한을 허용해주세요</span>';
+    nocam.innerHTML = `<span style="font-size:20px">${ic('video-off')}</span><span>카메라/마이크<br>권한을 허용해주세요</span>`;
     localVideo.parentElement.appendChild(nocam);
   }
 
@@ -733,7 +736,7 @@ remoteMicBtn.addEventListener('click', () => {
   if (!isHost || !socket) return;
   remoteMicMuted = !remoteMicMuted;
   socket.emit('host-control-mic', { muted: remoteMicMuted });
-  remoteMicBtn.textContent = remoteMicMuted ? '🔇' : '🎤';
+  remoteMicBtn.innerHTML = ic(remoteMicMuted ? 'mic-off' : 'mic');
   remoteMicBtn.classList.toggle('muted', remoteMicMuted);
 });
 
@@ -812,7 +815,7 @@ function leaveRoom() {
   micOn = true; camOn = true;
   isHost = false;
   remoteMicMuted = false;
-  remoteMicBtn.textContent = '🎤';
+  remoteMicBtn.innerHTML = ic('mic');
   remoteMicBtn.classList.remove('muted');
   remoteVolSlider.value = 100;
   remoteVolDisplay.textContent = '100%';
@@ -1095,7 +1098,7 @@ function setupCtx(ctx, tool, color, size) {
 const penPopup  = document.getElementById('pen-popup');
 const penOpts   = document.querySelectorAll('.pen-opt');
 
-const PEN_ICONS = { free: '✏️', line: '╱', snap: '┼' };
+const PEN_ICONS = { free: ic('pencil'), line: '╱', snap: '┼' };
 
 toolPen.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -1117,8 +1120,8 @@ penOpts.forEach(btn => {
     toolPen.classList.add('active');
     toolEraser.classList.remove('active');
     toolShapeBtn.classList.remove('active');
-    toolShapeBtn.textContent = '🔷';
-    toolPen.textContent = PEN_ICONS[currentPenMode];
+    toolShapeBtn.innerHTML = ic('shapes');
+    toolPen.innerHTML = PEN_ICONS[currentPenMode];
     penOpts.forEach(o => o.classList.toggle('active', o.dataset.mode === currentPenMode));
     setPencilCursor();
   });
@@ -1274,7 +1277,7 @@ sizeSlider.addEventListener('input', e => {
 });
 
 function updateHostUI() {
-  localLabel.textContent = isHost ? `👑 ${myUsername}` : myUsername;
+  localLabel.innerHTML = isHost ? `${ic('crown')} ${escHtml(myUsername)}` : escHtml(myUsername);
   clearAllBtn.style.opacity = isHost ? '1' : '0.3';
   clearAllBtn.style.cursor  = isHost ? 'pointer' : 'not-allowed';
   clearAllBtn.title = isHost ? '전체 지우기' : '방장만 지울 수 있습니다';
@@ -1590,7 +1593,7 @@ function startRecording() {
   recStartTime = Date.now();
 
   // UI
-  recordBtn.textContent = '⏹ 중지';
+  recordBtn.innerHTML = `${ic('stop')} 중지`;
   recordBtn.classList.add('recording');
   recIndicator.classList.remove('hidden');
   recTimerInterval = setInterval(() => {
@@ -1603,7 +1606,7 @@ function stopRecording() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
   socket && socket.emit('recording-state', false);
   clearInterval(recTimerInterval);
-  recordBtn.textContent = '⏺ 녹화';
+  recordBtn.innerHTML = `${ic('record')} 녹화`;
   recordBtn.classList.remove('recording');
   recIndicator.classList.add('hidden');
   recTimer.textContent = '00:00';
@@ -1831,7 +1834,7 @@ async function exportPdf() {
     alert('PDF를 만들지 못했습니다. 다시 시도해주세요.');
   } finally {
     exportPdfBtn.disabled = false;
-    exportPdfBtn.textContent = '📄 PDF로 저장';
+    exportPdfBtn.innerHTML = `${ic('file')} PDF로 저장`;
   }
 }
 

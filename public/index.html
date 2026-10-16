@@ -3,17 +3,36 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-  <title>화상 화이트보드</title>
-  <link rel="stylesheet" href="style.css?v=7" />
+  <title>봄노트 실시간 수업</title>
+  <link rel="stylesheet" href="style.css?v=8" />
 </head>
 <body>
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="i-video" viewBox="0 0 24 24"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></symbol>
+    <symbol id="i-video-off" viewBox="0 0 24 24"><path d="M10.66 6H14a2 2 0 0 1 2 2v2.5l5.248-3.062A.5.5 0 0 1 22 7.87v8.196"/><path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2"/><path d="m2 2 20 20"/></symbol>
+    <symbol id="i-board" viewBox="0 0 24 24"><path d="M2 3h20"/><path d="M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3"/><path d="m7 21 5-5 5 5"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></symbol>
+    <symbol id="i-record" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4" fill="currentColor"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></symbol>
+    <symbol id="i-mic-off" viewBox="0 0 24 24"><path d="m2 2 20 20"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M12 19v3"/></symbol>
+    <symbol id="i-volume" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M21 4h-7"/><path d="M10 4H3"/><path d="M21 12h-9"/><path d="M8 12H3"/><path d="M21 20h-5"/><path d="M12 20H3"/><path d="M14 2v4"/><path d="M8 10v4"/><path d="M16 18v4"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></symbol>
+    <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></symbol>
+    <symbol id="i-eraser" viewBox="0 0 24 24"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></symbol>
+    <symbol id="i-shapes" viewBox="0 0 24 24"><path d="M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/></symbol>
+    <symbol id="i-crown" viewBox="0 0 24 24"><path d="M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z"/><path d="M5 21h14"/></symbol>
+  </svg>
 
   <!-- 입장 화면 -->
   <div id="lobby">
     <div class="lobby-box">
-      <div class="lobby-icon">🎥</div>
-      <h1>화상 화이트보드</h1>
-      <p class="subtitle">봄노트 실시간 수업</p>
+      <div class="lobby-icon"><svg class="ic"><use href="#i-video"/></svg></div>
+      <h1>봄노트 실시간 수업</h1>
+      <p class="subtitle">화상 수업 + 화이트보드</p>
       <p id="lobby-info" class="lobby-info"></p>
       <button id="join-btn">수업 입장</button>
       <p id="lobby-error" class="error-msg"></p>
@@ -26,15 +45,15 @@
     <!-- 상단 헤더 -->
     <div class="room-header">
       <div class="header-left">
-        <span class="room-icon">📋</span>
+        <span class="room-icon"><svg class="ic"><use href="#i-board"/></svg></span>
         <span id="room-title"></span>
         <span id="remote-rec-banner" class="remote-rec-banner hidden">● 상대방이 녹화 중입니다</span>
       </div>
       <div class="header-right">
         <span id="connection-status" class="status-badge waiting">대기 중</span>
-        <button id="chat-toggle-btn" class="chat-toggle-btn">💬</button>
-        <button id="export-pdf-btn" class="record-btn export-pdf-btn">📄 PDF로 저장</button>
-        <button id="record-btn" class="record-btn">⏺ 녹화</button>
+        <button id="chat-toggle-btn" class="chat-toggle-btn"><svg class="ic"><use href="#i-chat"/></svg></button>
+        <button id="export-pdf-btn" class="record-btn export-pdf-btn"><svg class="ic"><use href="#i-file"/></svg> PDF로 저장</button>
+        <button id="record-btn" class="record-btn"><svg class="ic"><use href="#i-record"/></svg> 녹화</button>
         <div id="rec-indicator" class="rec-indicator hidden">
           <span class="rec-dot"></span>
           <span id="rec-timer">00:00</span>
@@ -56,11 +75,11 @@
             </div>
             <span class="video-label" id="remote-label">상대방</span>
             <div id="remote-controls" class="remote-controls hidden">
-              <button id="remote-mic-btn" class="remote-ctrl-btn" title="마이크 음소거">🎤</button>
-              <span class="remote-vol-icon">🔊</span>
+              <button id="remote-mic-btn" class="remote-ctrl-btn" title="마이크 음소거"><svg class="ic"><use href="#i-mic"/></svg></button>
+              <span class="remote-vol-icon"><svg class="ic"><use href="#i-volume"/></svg></span>
               <input id="remote-vol-slider" type="range" min="0" max="100" value="100" class="remote-vol-slider" title="스피커 볼륨" />
               <span id="remote-vol-display" class="remote-vol-display">100%</span>
-              <button id="remote-settings-btn" class="remote-ctrl-btn" title="상대방 기기 설정">⚙️</button>
+              <button id="remote-settings-btn" class="remote-ctrl-btn" title="상대방 기기 설정"><svg class="ic"><use href="#i-settings"/></svg></button>
             </div>
           </div>
           <div class="video-box local-box">
@@ -70,17 +89,17 @@
         </div>
         <div class="video-controls">
           <button id="screen-share-btn" class="ctrl-btn" title="화면 공유">
-            <span class="btn-icon">🖥️</span>
+            <span class="btn-icon"><svg class="ic"><use href="#i-monitor"/></svg></span>
             <span class="btn-label">화면 공유</span>
           </button>
           <button id="settings-btn" class="ctrl-btn" title="미디어 설정">
-            <span class="btn-icon">⚙️</span>
+            <span class="btn-icon"><svg class="ic"><use href="#i-settings"/></svg></span>
             <span class="btn-label">설정</span>
           </button>
         </div>
         <div class="chat-section">
           <button id="chat-close-btn" class="chat-mobile-close">✕</button>
-          <div class="chat-title">💬 채팅</div>
+          <div class="chat-title"><svg class="ic"><use href="#i-chat"/></svg> 채팅</div>
           <div id="chat-messages"></div>
           <div class="chat-input-row">
             <input id="chat-input" type="text" placeholder="메시지..." maxlength="300" />
@@ -97,16 +116,16 @@
           <div class="toolbar">
             <div class="tool-group">
               <div class="shape-wrap">
-                <button id="tool-pen" class="tool-btn active" title="펜">✏️</button>
+                <button id="tool-pen" class="tool-btn active" title="펜"><svg class="ic"><use href="#i-pencil"/></svg></button>
                 <div id="pen-popup" class="tool-popup hidden">
                   <button class="pen-opt active" data-mode="free"  title="자유선">〜</button>
                   <button class="pen-opt"        data-mode="line"  title="직선">╱</button>
                   <button class="pen-opt"        data-mode="snap"  title="수직/수평선">┼</button>
                 </div>
               </div>
-              <button id="tool-eraser" class="tool-btn" title="지우개">🧹</button>
+              <button id="tool-eraser" class="tool-btn" title="지우개"><svg class="ic"><use href="#i-eraser"/></svg></button>
               <div class="shape-wrap">
-                <button id="tool-shape" class="tool-btn" title="도형">🔷</button>
+                <button id="tool-shape" class="tool-btn" title="도형"><svg class="ic"><use href="#i-shapes"/></svg></button>
                 <div id="shape-popup" class="tool-popup hidden">
                   <button class="shape-opt" data-shape="rect"     data-filled="false" title="사각형">□</button>
                   <button class="shape-opt" data-shape="triangle" data-filled="false" title="삼각형">△</button>
@@ -134,7 +153,7 @@
               <span id="size-display">4</span>
             </div>
             <div class="tool-group">
-              <button id="pdf-btn" class="action-btn" title="PDF 업로드">📄 PDF</button>
+              <button id="pdf-btn" class="action-btn" title="PDF 업로드"><svg class="ic"><use href="#i-file"/></svg> PDF</button>
               <input id="pdf-input" type="file" accept=".pdf" class="hidden" />
             </div>
             <div class="tool-group pdf-nav hidden" id="pdf-nav">
@@ -164,8 +183,8 @@
         <!-- ③ 하단 모드 탭 바 -->
         <div class="mode-bar">
           <div class="mode-tabs">
-            <button id="mode-wb"  class="mode-tab active">✏️ 화이트보드</button>
-            <button id="mode-screen" class="mode-tab">🖥️ 화면 공유</button>
+            <button id="mode-wb"  class="mode-tab active"><svg class="ic"><use href="#i-pencil"/></svg> 화이트보드</button>
+            <button id="mode-screen" class="mode-tab"><svg class="ic"><use href="#i-monitor"/></svg> 화면 공유</button>
           </div>
           <button id="clear-all-btn" class="clear-all-btn">🗑️ 전체 지우기</button>
         </div>
@@ -184,12 +203,12 @@
     <div id="settings-modal" class="settings-modal hidden">
       <div class="settings-box">
         <div class="settings-header">
-          <span>⚙️ 미디어 설정</span>
+          <span><svg class="ic"><use href="#i-settings"/></svg> 미디어 설정</span>
           <button id="settings-close" class="settings-close-btn">✕</button>
         </div>
         <div class="settings-body">
           <div class="settings-section">
-            <div class="settings-section-title">📷 카메라</div>
+            <div class="settings-section-title"><svg class="ic"><use href="#i-camera"/></svg> 카메라</div>
             <div class="settings-row">
               <label>장치</label>
               <select id="cam-select" class="settings-select"></select>
@@ -200,7 +219,7 @@
             </div>
           </div>
           <div class="settings-section">
-            <div class="settings-section-title">🎤 마이크</div>
+            <div class="settings-section-title"><svg class="ic"><use href="#i-mic"/></svg> 마이크</div>
             <div class="settings-row">
               <label>장치</label>
               <select id="mic-select" class="settings-select"></select>
@@ -216,7 +235,7 @@
             </div>
           </div>
           <div class="settings-section">
-            <div class="settings-section-title">🔊 스피커</div>
+            <div class="settings-section-title"><svg class="ic"><use href="#i-volume"/></svg> 스피커</div>
             <div class="settings-row">
               <label>장치</label>
               <select id="speaker-select" class="settings-select"></select>
@@ -233,26 +252,26 @@
     <div id="remote-settings-modal" class="settings-modal hidden">
       <div class="settings-box">
         <div class="settings-header">
-          <span>⚙️ 상대방 기기 설정</span>
+          <span><svg class="ic"><use href="#i-settings"/></svg> 상대방 기기 설정</span>
           <button id="remote-settings-close" class="settings-close-btn">✕</button>
         </div>
         <div class="settings-body">
           <div class="settings-section">
-            <div class="settings-section-title">📷 카메라</div>
+            <div class="settings-section-title"><svg class="ic"><use href="#i-camera"/></svg> 카메라</div>
             <div class="settings-row">
               <label>장치</label>
               <select id="remote-cam-select" class="settings-select"></select>
             </div>
           </div>
           <div class="settings-section">
-            <div class="settings-section-title">🎤 마이크</div>
+            <div class="settings-section-title"><svg class="ic"><use href="#i-mic"/></svg> 마이크</div>
             <div class="settings-row">
               <label>장치</label>
               <select id="remote-mic-select" class="settings-select"></select>
             </div>
           </div>
           <div class="settings-section">
-            <div class="settings-section-title">🔊 스피커</div>
+            <div class="settings-section-title"><svg class="ic"><use href="#i-volume"/></svg> 스피커</div>
             <div class="settings-row">
               <label>장치</label>
               <select id="remote-speaker-select" class="settings-select"></select>
@@ -266,6 +285,6 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-  <script src="client.js?v=7"></script>
+  <script src="client.js?v=8"></script>
 </body>
 </html>

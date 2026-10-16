@@ -66,11 +66,11 @@ body {
 }
 
 .lobby-box input:focus {
-  border-color: #5b7fff;
+  border-color: #22c55e;
 }
 
 #join-btn {
-  background: linear-gradient(135deg, #5b7fff, #7c4fff);
+  background: linear-gradient(135deg, #22c55e, #16a34a);
   border: none;
   border-radius: 10px;
   padding: 13px;
@@ -279,7 +279,7 @@ body {
 .settings-section-title {
   font-size: 11px;
   font-weight: 700;
-  color: #5b7fff;
+  color: #22c55e;
   text-transform: uppercase;
   letter-spacing: 0.8px;
   padding-bottom: 4px;
@@ -314,7 +314,7 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.settings-select:focus { border-color: #5b7fff; }
+.settings-select:focus { border-color: #22c55e; }
 
 .settings-toggle {
   padding: 5px 16px;
@@ -330,7 +330,7 @@ body {
 
 .settings-range {
   flex: 1;
-  accent-color: #5b7fff;
+  accent-color: #22c55e;
   cursor: pointer;
 }
 
@@ -444,7 +444,7 @@ body {
 .remote-vol-slider {
   flex: 1;
   height: 4px;
-  accent-color: #5b7fff;
+  accent-color: #22c55e;
   cursor: pointer;
   min-width: 0;
 }
@@ -589,10 +589,10 @@ body {
   outline: none;
 }
 
-.chat-input-row input:focus { border-color: #5b7fff; }
+.chat-input-row input:focus { border-color: #22c55e; }
 
 #send-btn {
-  background: #5b7fff;
+  background: #22c55e;
   border: none;
   border-radius: 8px;
   padding: 7px 12px;
@@ -652,8 +652,8 @@ body {
 .mode-tab:hover { background: #252b3b; color: #c5cde0; }
 
 .mode-tab.active {
-  background: #5b7fff;
-  border-color: #5b7fff;
+  background: #22c55e;
+  border-color: #22c55e;
   color: #fff;
   font-weight: 600;
 }
@@ -707,7 +707,7 @@ body {
 }
 
 .tool-btn:hover { background: #252b3b; }
-.tool-btn.active { background: #5b7fff; border-color: #5b7fff; }
+.tool-btn.active { background: #22c55e; border-color: #22c55e; }
 
 .action-btn {
   background: #1e2332;
@@ -734,7 +734,7 @@ body {
 
 #size-slider {
   width: 80px;
-  accent-color: #5b7fff;
+  accent-color: #22c55e;
 }
 
 #size-display {
@@ -819,9 +819,9 @@ body {
 }
 
 .page-num-btn.active {
-  background: #5b7fff;
+  background: #22c55e;
   color: #fff;
-  border-color: #5b7fff;
+  border-color: #22c55e;
   font-weight: 700;
 }
 
@@ -912,7 +912,7 @@ body {
 }
 
 .shape-opt:hover, .pen-opt:hover { background: #2d3555; }
-.shape-opt.active, .pen-opt.active { background: #5b7fff; color: #fff; border-color: #5b7fff; }
+.shape-opt.active, .pen-opt.active { background: #22c55e; color: #fff; border-color: #22c55e; }
 
 .color-swatches {
   display: flex;
@@ -935,7 +935,7 @@ body {
 
 .color-swatch.active {
   border-color: #fff;
-  box-shadow: 0 0 0 2px #5b7fff;
+  box-shadow: 0 0 0 2px #22c55e;
 }
 
 .zoom-indicator {
@@ -1095,7 +1095,7 @@ body {
 }
 #screen-view { width: 100%; height: 100%; object-fit: contain; }
 .screen-empty { position: absolute; color: #8892a4; font-size: 14px; }
-.ctrl-btn.active { background: #1a2a4a; border-color: #5b7fff; color: #9db4ff; }
+.ctrl-btn.active { background: #14532d; border-color: #22c55e; color: #86efac; }
 
 /* ── 상대방 녹화 중 표시 ── */
 .remote-rec-banner {
@@ -1110,3 +1110,20 @@ body {
 
 /* 펜·터치로 그릴 때 페이지가 스크롤·확대되지 않도록 */
 #draw-canvas { touch-action: none; }
+
+/* ── 아이콘 (index.html 스프라이트) ── */
+.icon-sprite { display: none; }
+.ic {
+  width: 1.1em;
+  height: 1.1em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: -0.2em;
+  flex-shrink: 0;
+}
+.lobby-icon .ic { width: 40px; height: 40px; color: #22c55e; }
+.tool-btn .ic, .chat-toggle-btn .ic, .remote-ctrl-btn .ic { width: 1.25em; height: 1.25em; vertical-align: -0.3em; }
+.btn-icon .ic { width: 20px; height: 20px; }
