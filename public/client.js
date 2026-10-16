@@ -5,31 +5,32 @@
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-const ICE_SERVERS = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    {
-      urls: [
-        'turn:openrelay.metered.ca:80',
-        'turn:openrelay.metered.ca:443',
-        'turn:openrelay.metered.ca:443?transport=tcp'
-      ],
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    }
-  ]
-};
+// 서버에서 TURN 자격증명을 못 받았을 때 사용
+const FALLBACK_ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' }
+];
+
+// 이 브라우저 탭 고유 ID — 재접속해도 유지되어 내 획 식별에 사용
+const clientId = uid();
+
+function uid() {
+  return (crypto.randomUUID && crypto.randomUUID()) ||
+    Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
 
 // ── 상태 ──
 let socket, localStream, peerConnection;
 let myUsername = '', myRoomId = '', remoteSocketId = '';
+let hasJoined = false;
+let iceConfigPromise = null;
+let pendingCandidates = [];
+let isOfferer = false;
 let micOn = true, camOn = true;
 let micVolumeVal = 100, speakerVolumeVal = 100;
 let micAudioCtx = null, micGainNode = null, gainedAudioTrack = null;
 let selectedMicId = '', selectedCamId = '', selectedSpeakerId = '';
 let isDrawing = false;
-let remoteDrawState = { tool: 'pen', color: '#000000', size: 4 };
 let shapeFilled = false;
 let isHost = false;
 let remoteMicMuted = false;
@@ -42,21 +43,24 @@ let currentPenMode = 'free'; // 'free' | 'line' | 'snap'
 let shapeStartX = 0, shapeStartY = 0;
 
 // PDF 상태
-let pdfDoc = null, pdfCurrentPage = 1, pdfTotalPages = 0;
+let pdfDoc = null, pdfCurrentPage = 1, pdfTotalPages = 0, pdfVersion = null;
+let pdfRenderSeq = 0, pdfRenderTask = null;
 
 // 줌
 let zoomLevel = 1.0;
 let zoomHideTimer = null;
 let pdfBaseScale = 1;
 let zoomRenderTimer = null;
+let canvasZoom = 1; // 캔버스 해상도에 반영된 줌 (PDF는 줌 배율로 다시 렌더링, 빈 보드는 1)
 
 // 녹화 상태
-let mediaRecorder = null, recordChunks = [], recordAnimFrame = null;
+let mediaRecorder = null, recordChunks = [], recordTimer = null;
 let audioCtx = null, recTimerInterval = null, recStartTime = 0;
 
-// 실행취소 히스토리
-const drawHistory = [];
-const MAX_HISTORY = 30;
+// 획 데이터 — 좌표는 캔버스 대비 0~1 비율, 굵기는 캔버스 너비 대비 비율
+// { id, owner, page, kind: 'path'|'line'|'shape', tool, shape, filled, color, size, points: [[x,y], ...] }
+let strokes = [];
+let myStroke = null; // 그리는 중인 내 자유선 획
 
 // ── DOM ──
 const lobby        = document.getElementById('lobby');
@@ -102,7 +106,6 @@ const toolEraser   = document.getElementById('tool-eraser');
 const colorSwatches = document.querySelectorAll('.color-swatch');
 const sizeSlider   = document.getElementById('size-slider');
 const sizeDisplay  = document.getElementById('size-display');
-const clearBtn     = null; // 하단 clearAllBtn으로 통합
 const pdfBtn       = document.getElementById('pdf-btn');
 const pdfInput     = document.getElementById('pdf-input');
 const pdfNav       = document.getElementById('pdf-nav');
@@ -162,6 +165,13 @@ const chatSection    = document.querySelector('.chat-section');
   if (r) roomInput.value = r;
 })();
 
+// 추측하기 어려운 방 이름 생성
+document.getElementById('random-room-btn').addEventListener('click', () => {
+  const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(10));
+  roomInput.value = Array.from(bytes, b => chars[b % chars.length]).join('');
+});
+
 joinBtn.addEventListener('click', joinRoom);
 [usernameInput, roomInput].forEach(el =>
   el.addEventListener('keydown', e => { if (e.key === 'Enter') joinRoom(); })
@@ -190,6 +200,7 @@ async function initApp() {
     showSystemMsg('카메라/마이크를 사용할 수 없습니다.');
     // 로컬 비디오 박스에 안내 표시
     const nocam = document.createElement('div');
+    nocam.className = 'nocam-overlay';
     nocam.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:4px;background:#0a0c14;color:#8892a4;font-size:11px;text-align:center;padding:8px;z-index:1;';
     nocam.innerHTML = '<span style="font-size:20px">📵</span><span>카메라/마이크<br>권한을 허용해주세요</span>';
     localVideo.parentElement.appendChild(nocam);
@@ -200,7 +211,10 @@ async function initApp() {
 
   socket = io();
   setupSocketEvents();
-  socket.emit('join-room', { roomId: myRoomId, username: myUsername });
+  // 최초 연결과 재연결 모두 방에 (다시) 입장
+  socket.on('connect', () => {
+    socket.emit('join-room', { roomId: myRoomId, username: myUsername, clientId });
+  });
 
   lobby.classList.add('hidden');
   roomEl.classList.remove('hidden');
@@ -221,7 +235,9 @@ async function initApp() {
 ════════════════════════════════════════════ */
 function setupSocketEvents() {
 
-  socket.on('joined', ({ users, isHost: host }) => {
+  socket.on('joined', async ({ users, isHost: host, state }) => {
+    if (hasJoined) showSystemMsg('서버에 다시 연결되었습니다.');
+    hasJoined = true;
     isHost = host;
     updateHostUI();
     const others = users.filter(u => u.socketId !== socket.id);
@@ -229,6 +245,12 @@ function setupSocketEvents() {
       remoteSocketId = others[0].socketId;
       remoteLabel.textContent = others[0].username;
     }
+    await applyRoomState(state);
+  });
+
+  socket.on('disconnect', (reason) => {
+    // 직접 나간 경우(io client disconnect)는 안내하지 않음
+    if (reason !== 'io client disconnect') showSystemMsg('서버 연결이 끊겼습니다. 다시 연결하는 중...');
   });
 
   socket.on('host-transferred', () => {
@@ -238,44 +260,46 @@ function setupSocketEvents() {
   });
 
   socket.on('room-full', () => {
+    leaveRoom();
     alert('방이 꽉 찼습니다 (최대 2명).');
-    lobby.classList.remove('hidden');
-    roomEl.classList.add('hidden');
   });
 
-  // 상대방이 나중에 들어옴 → 내가 offer를 보냄
+  // 상대방이 나중에 들어옴 → 내가 offer를 보냄 (보드 상태는 서버가 직접 전달)
   socket.on('user-joined', async ({ socketId, username }) => {
     remoteSocketId = socketId;
     remoteLabel.textContent = username;
     showSystemMsg(`${username}님이 입장했습니다.`);
-    // 기존 보드 상태 요청
-    socket.emit('request-board-state', socketId);
-    await createPeerConnection();
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    socket.emit('offer', { offer, to: socketId });
+    await startCall();
   });
 
   socket.on('offer', async ({ offer, from, username }) => {
     remoteSocketId = from;
+    isOfferer = false;
     if (!remoteLabel.textContent || remoteLabel.textContent === '상대방') {
       remoteLabel.textContent = username || '상대방';
     }
     await createPeerConnection();
     await peerConnection.setRemoteDescription(offer);
+    await flushPendingCandidates();
     const answer = await peerConnection.createAnswer();
     await peerConnection.setLocalDescription(answer);
     socket.emit('answer', { answer, to: from });
   });
 
   socket.on('answer', async ({ answer }) => {
-    if (peerConnection) await peerConnection.setRemoteDescription(answer);
+    if (!peerConnection) return;
+    await peerConnection.setRemoteDescription(answer);
+    await flushPendingCandidates();
   });
 
   socket.on('ice-candidate', async ({ candidate }) => {
-    if (peerConnection && candidate) {
-      try { await peerConnection.addIceCandidate(candidate); } catch (_) {}
+    if (!candidate) return;
+    // 연결 준비 전에 도착한 후보는 보관했다가 나중에 추가
+    if (!peerConnection || !peerConnection.remoteDescription) {
+      pendingCandidates.push(candidate);
+      return;
     }
+    try { await peerConnection.addIceCandidate(candidate); } catch (_) {}
   });
 
   socket.on('user-left', ({ username }) => {
@@ -294,33 +318,39 @@ function setupSocketEvents() {
     appendMessage(username, message, time, username === myUsername ? 'mine' : '');
   });
 
-  // 화이트보드 수신
-  socket.on('draw-start', ({ x, y, color, size, tool }) => {
-    remoteDrawState = { tool, color, size };
-    setupCtx(drawCtx, tool, color, size);
-    drawCtx.beginPath();
-    drawCtx.moveTo(x, y);
+  // 화이트보드 수신 — 상대 획은 구간마다 독립된 path로 그려 내 획과 섞이지 않음
+  socket.on('stroke-start', (stroke) => {
+    strokes.push(stroke);
+    if (stroke.kind === 'path') {
+      if (stroke.page === currentPageKey()) drawSegment(stroke, stroke.points[0], stroke.points[0]);
+    } else if (stroke.page === currentPageKey()) {
+      drawStroke(drawCtx, stroke);
+    }
   });
-  socket.on('draw-move', ({ x, y }) => {
-    setupCtx(drawCtx, remoteDrawState.tool, remoteDrawState.color, remoteDrawState.size);
-    drawCtx.lineTo(x, y);
-    drawCtx.stroke();
+  socket.on('stroke-points', ({ id, points }) => {
+    const stroke = strokes.findLast(s => s.id === id);
+    if (!stroke) return;
+    for (const p of points) {
+      const prev = stroke.points[stroke.points.length - 1];
+      stroke.points.push(p);
+      if (stroke.page === currentPageKey()) drawSegment(stroke, prev, p);
+    }
   });
-  socket.on('draw-end', () => drawCtx.closePath());
-  socket.on('draw-shape', ({ type, x1, y1, x2, y2, color, size, filled }) => {
-    renderShape(drawCtx, type, x1, y1, x2, y2, color, size, filled);
+  socket.on('stroke-removed', (id) => {
+    strokes = strokes.filter(s => s.id !== id);
+    redrawBoard();
   });
-  socket.on('draw-line', ({ x1, y1, x2, y2, color, size }) => {
-    renderLine(drawCtx, x1, y1, x2, y2, color, size);
+  socket.on('board-cleared', (page) => {
+    strokes = strokes.filter(s => s.page !== page);
+    if (page === currentPageKey()) redrawBoard();
   });
-
-  socket.on('whiteboard-clear', () => { clearDrawCanvas(); saveSnapshot(); });
-  socket.on('whiteboard-undo', (imageData) => applySnapshot(imageData));
 
   // PDF 수신
-  socket.on('pdf-upload', async ({ data, name }) => {
+  socket.on('pdf-updated', async ({ name, version }) => {
     showSystemMsg(`상대방이 PDF를 공유했습니다: ${name}`);
-    await loadPdfFromBase64(data);
+    strokes = strokes.filter(s => s.page === 0);
+    await loadPdfFromServer(version);
+    await renderPdfPage(1);
   });
   socket.on('pdf-page-change', (page) => {
     if (pdfDoc) renderPdfPage(page);
@@ -328,26 +358,6 @@ function setupSocketEvents() {
 
   // 웹 공유
   socket.on('web-navigate', (url) => navigateWebFrame(url, false));
-  socket.on('web-url-request', (requesterId) => {
-    socket.emit('web-url-response', { to: requesterId, url: webUrlInput.value });
-  });
-  socket.on('web-url-response', (url) => navigateWebFrame(url, false));
-
-  // 보드 상태 동기화
-  socket.on('board-state-request', (requesterSocketId) => {
-    const imageData = drawCanvas.toDataURL();
-    socket.emit('board-state-response', {
-      to: requesterSocketId,
-      imageData,
-      pdfPage: pdfCurrentPage
-    });
-  });
-  socket.on('board-state-response', ({ imageData, pdfPage }) => {
-    const img = new Image();
-    img.onload = () => drawCtx.drawImage(img, 0, 0);
-    img.src = imageData;
-    if (pdfDoc) renderPdfPage(pdfPage);
-  });
 
   // 방장이 보낸 마이크 제어 명령 수신
   socket.on('host-control-mic', ({ muted }) => {
@@ -414,9 +424,43 @@ function setupSocketEvents() {
 /* ════════════════════════════════════════════
    WebRTC
 ════════════════════════════════════════════ */
+// TURN 자격증명은 서버에서 한 번 받아 재사용
+function getIceConfig() {
+  if (!iceConfigPromise) {
+    iceConfigPromise = new Promise(resolve => {
+      socket.timeout(5000).emit('get-ice-servers', (err, servers) => {
+        resolve({ iceServers: err || !Array.isArray(servers) ? FALLBACK_ICE_SERVERS : servers });
+      });
+    });
+  }
+  return iceConfigPromise;
+}
+
+// 내가 offer를 보내는 쪽으로 통화 연결 (상대 입장 시 / ICE 실패 후 재연결 시)
+async function startCall() {
+  if (!remoteSocketId) return;
+  isOfferer = true;
+  await createPeerConnection();
+  const offer = await peerConnection.createOffer();
+  await peerConnection.setLocalDescription(offer);
+  socket.emit('offer', { offer, to: remoteSocketId });
+}
+
+async function flushPendingCandidates() {
+  const list = pendingCandidates;
+  pendingCandidates = [];
+  for (const c of list) {
+    try { await peerConnection.addIceCandidate(c); } catch (_) {}
+  }
+}
+
 async function createPeerConnection() {
-  if (peerConnection) peerConnection.close();
-  peerConnection = new RTCPeerConnection(ICE_SERVERS);
+  if (peerConnection) { peerConnection.close(); peerConnection = null; }
+  pendingCandidates = [];
+  const config = await getIceConfig();
+  if (peerConnection) peerConnection.close(); // 기다리는 사이 다른 연결이 만들어진 경우
+  const pc = new RTCPeerConnection(config);
+  peerConnection = pc;
 
   if (localStream) {
     localStream.getVideoTracks().forEach(t => peerConnection.addTrack(t, localStream));
@@ -448,15 +492,15 @@ async function createPeerConnection() {
   };
 
   peerConnection.oniceconnectionstatechange = () => {
-    const s = peerConnection.iceConnectionState;
-    if (s === 'failed') {
-      // ICE 실패 시 재시도
-      peerConnection.restartIce && peerConnection.restartIce();
+    if (pc.iceConnectionState === 'failed' && isOfferer && peerConnection === pc) {
+      // ICE 실패 시 offer 쪽에서 새로 협상 (상대는 offer를 받으면 연결을 새로 만듦)
+      setTimeout(() => { if (peerConnection === pc) startCall(); }, 1000);
     }
   };
 
   peerConnection.onconnectionstatechange = () => {
-    const s = peerConnection.connectionState;
+    if (peerConnection !== pc) return;
+    const s = pc.connectionState;
     if (s === 'connected') {
       waitingOverlay.style.display = 'none';
       statusBadge.textContent = '연결됨';
@@ -728,9 +772,15 @@ copyLinkBtn.addEventListener('click', async () => {
 /* ════════════════════════════════════════════
    나가기
 ════════════════════════════════════════════ */
-leaveBtn.addEventListener('click', () => {
+leaveBtn.addEventListener('click', leaveRoom);
+
+function leaveRoom() {
   if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording();
   if (peerConnection) { peerConnection.close(); peerConnection = null; }
+  pendingCandidates = [];
+  iceConfigPromise = null;
+  hasJoined = false;
+  remoteSocketId = '';
   if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
   if (micAudioCtx) { micAudioCtx.close(); micAudioCtx = null; }
   gainedAudioTrack = null;
@@ -744,6 +794,9 @@ leaveBtn.addEventListener('click', () => {
   remoteControls.classList.add('hidden');
   if (socket) { socket.disconnect(); socket = null; }
   pdfDoc = null;
+  pdfVersion = null;
+  strokes = [];
+  myStroke = null;
   window.history.replaceState({}, '', window.location.pathname);
   roomEl.classList.add('hidden');
   lobby.classList.remove('hidden');
@@ -753,61 +806,36 @@ leaveBtn.addEventListener('click', () => {
   pagesPanel.classList.add('hidden');
   pagesList.innerHTML = '';
   chatMessages.innerHTML = '';
-});
+  // 카메라 없음 안내가 남아 있으면 제거
+  localVideo.parentElement.querySelectorAll('.nocam-overlay').forEach(el => el.remove());
+}
 
 /* ════════════════════════════════════════════
    화이트보드 – 캔버스 초기화
 ════════════════════════════════════════════ */
 function initCanvasSize(w = 1600, h = 900) {
   [pdfCanvas, drawCanvas, previewCanvas].forEach(c => { c.width = w; c.height = h; });
+  canvasZoom = 1;
   canvasInner.style.width  = w + 'px';
   canvasInner.style.height = h + 'px';
   drawCtx.lineCap  = 'round';
   drawCtx.lineJoin = 'round';
   applyZoom();
   setPencilCursor();
+  redrawBoard();
 }
 
 function applyZoom() {
-  canvasInner.style.transform = `scale(${zoomLevel})`;
-  canvasWrapper.style.width  = Math.ceil(drawCanvas.width  * zoomLevel) + 'px';
-  canvasWrapper.style.height = Math.ceil(drawCanvas.height * zoomLevel) + 'px';
+  // 캔버스에 이미 반영된 줌(canvasZoom)을 뺀 나머지만 CSS로 확대
+  const cssScale = zoomLevel / canvasZoom;
+  canvasInner.style.transform = `scale(${cssScale})`;
+  canvasWrapper.style.width  = Math.ceil(drawCanvas.width  * cssScale) + 'px';
+  canvasWrapper.style.height = Math.ceil(drawCanvas.height * cssScale) + 'px';
   if (pdfDoc) {
-    // PDF가 있으면 줌 멈춘 뒤 300ms 후 고해상도로 재렌더링
+    // PDF가 있으면 줌 멈춘 뒤 300ms 후 고해상도로 재렌더링 (필기도 획 데이터로 다시 그림)
     clearTimeout(zoomRenderTimer);
-    zoomRenderTimer = setTimeout(rerenderPdfAtZoom, 300);
+    zoomRenderTimer = setTimeout(() => renderPdfPage(pdfCurrentPage), 300);
   }
-}
-
-async function rerenderPdfAtZoom() {
-  if (!pdfDoc) return;
-  const page = await pdfDoc.getPage(pdfCurrentPage);
-  const containerW = canvasContainer.clientWidth || 1200;
-  const containerH = canvasContainer.clientHeight || 800;
-  const viewport0 = page.getViewport({ scale: 1 });
-  pdfBaseScale = Math.min(containerW / viewport0.width, containerH / viewport0.height, 2);
-  const viewport = page.getViewport({ scale: pdfBaseScale * zoomLevel });
-  const W = Math.floor(viewport.width);
-  const H = Math.floor(viewport.height);
-
-  // 기존 필기 보존 후 캔버스 크기 변경
-  const drawSnapshot = drawCanvas.toDataURL();
-  const prevW = drawCanvas.width;
-
-  [pdfCanvas, drawCanvas, previewCanvas].forEach(c => { c.width = W; c.height = H; });
-  canvasInner.style.width  = W + 'px';
-  canvasInner.style.height = H + 'px';
-  canvasInner.style.transform = 'scale(1)';
-  canvasWrapper.style.width  = W + 'px';
-  canvasWrapper.style.height = H + 'px';
-
-  if (prevW > 0) {
-    const img = new Image();
-    img.onload = () => drawCtx.drawImage(img, 0, 0, W, H);
-    img.src = drawSnapshot;
-  }
-
-  await page.render({ canvasContext: pdfCtx, viewport }).promise;
 }
 
 function showZoomIndicator() {
@@ -817,6 +845,59 @@ function showZoomIndicator() {
   zoomHideTimer = setTimeout(() => zoomIndicator.classList.add('hidden'), 1200);
 }
 
+/* ────────── 획 데이터 ↔ 캔버스 ────────── */
+// 빈 보드는 0, PDF는 페이지 번호
+function currentPageKey() {
+  return pdfDoc ? pdfCurrentPage : 0;
+}
+
+const toNorm = (x, y) => [x / drawCanvas.width, y / drawCanvas.height];
+const toPx = ([x, y]) => [x * drawCanvas.width, y * drawCanvas.height];
+// 슬라이더 굵기(줌 100% 기준 px) → 캔버스 너비 대비 비율
+const normSize = () => strokeSize * canvasZoom / drawCanvas.width;
+
+function drawStroke(ctx, s) {
+  const pts = s.points.map(toPx);
+  const size = s.size * drawCanvas.width;
+  if (s.kind === 'shape') {
+    renderShape(ctx, s.shape, pts[0][0], pts[0][1], pts[1][0], pts[1][1], s.color, size, s.filled);
+    return;
+  }
+  if (s.kind === 'line') {
+    renderLine(ctx, pts[0][0], pts[0][1], pts[1][0], pts[1][1], s.color, size);
+    return;
+  }
+  setupCtx(ctx, s.tool, s.color, size);
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  if (pts.length === 1) ctx.lineTo(pts[0][0], pts[0][1]); // 점 하나
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.stroke();
+}
+
+// 그리는 중인 자유선의 한 구간만 그림 (독립된 path라 동시에 그려도 섞이지 않음)
+function drawSegment(s, from, to) {
+  const [x1, y1] = toPx(from), [x2, y2] = toPx(to);
+  setupCtx(drawCtx, s.tool, s.color, s.size * drawCanvas.width);
+  drawCtx.beginPath();
+  drawCtx.moveTo(x1, y1);
+  drawCtx.lineTo(x2, y2);
+  drawCtx.stroke();
+}
+
+function redrawBoard() {
+  clearDrawCanvas();
+  const page = currentPageKey();
+  strokes.forEach(s => { if (s.page === page) drawStroke(drawCtx, s); });
+}
+
+// 직선/도형 획을 확정해서 저장·전송
+function commitStroke(stroke) {
+  strokes.push(stroke);
+  drawStroke(drawCtx, stroke);
+  socket && socket.emit('stroke-start', stroke);
+}
+
 /* ────────── 그리기 이벤트 ────────── */
 // preview 캔버스 사용 여부 (도형 / 직선 / 수직선)
 function usesPreview() {
@@ -824,15 +905,25 @@ function usesPreview() {
     (currentTool === 'pen' && currentPenMode !== 'free');
 }
 
+function snapEnd(x, y) {
+  if (currentPenMode !== 'snap') return [x, y];
+  const dx = Math.abs(x - shapeStartX), dy = Math.abs(y - shapeStartY);
+  return dx >= dy ? [x, shapeStartY] : [shapeStartX, y];
+}
+
 drawCanvas.addEventListener('mousedown', e => {
   isDrawing = true;
   const { x, y } = getPos(e);
   lastX = x; lastY = y;
   if (usesPreview()) { shapeStartX = x; shapeStartY = y; return; }
-  setupCtx(drawCtx, currentTool, strokeColor, strokeSize);
-  drawCtx.beginPath();
-  drawCtx.moveTo(x, y);
-  socket && socket.emit('draw-start', { x, y, color: strokeColor, size: strokeSize, tool: currentTool });
+  const p = toNorm(x, y);
+  myStroke = {
+    id: uid(), owner: clientId, page: currentPageKey(), kind: 'path',
+    tool: currentTool, color: strokeColor, size: normSize(), points: [p]
+  };
+  strokes.push(myStroke);
+  drawSegment(myStroke, p, p);
+  socket && socket.emit('stroke-start', myStroke);
 });
 
 drawCanvas.addEventListener('mousemove', e => {
@@ -841,22 +932,20 @@ drawCanvas.addEventListener('mousemove', e => {
   if (usesPreview()) {
     previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
     if (currentTool === 'shape') {
-      renderShape(previewCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize, shapeFilled);
+      renderShape(previewCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize * canvasZoom, shapeFilled);
     } else {
-      let ex = x, ey = y;
-      if (currentPenMode === 'snap') {
-        const dx = Math.abs(x - shapeStartX), dy = Math.abs(y - shapeStartY);
-        if (dx >= dy) ey = shapeStartY; else ex = shapeStartX;
-      }
-      renderLine(previewCtx, shapeStartX, shapeStartY, ex, ey, strokeColor, strokeSize);
+      const [ex, ey] = snapEnd(x, y);
+      renderLine(previewCtx, shapeStartX, shapeStartY, ex, ey, strokeColor, strokeSize * canvasZoom);
     }
     return;
   }
-  setupCtx(drawCtx, currentTool, strokeColor, strokeSize);
-  drawCtx.lineTo(x, y);
-  drawCtx.stroke();
+  if (!myStroke) return;
+  const p = toNorm(x, y);
+  const prev = myStroke.points[myStroke.points.length - 1];
+  myStroke.points.push(p);
+  drawSegment(myStroke, prev, p);
   lastX = x; lastY = y;
-  socket && socket.emit('draw-move', { x, y });
+  socket && socket.emit('stroke-points', { id: myStroke.id, points: [p] });
 });
 
 ['mouseup', 'mouseleave'].forEach(evt =>
@@ -867,31 +956,18 @@ drawCanvas.addEventListener('mousemove', e => {
       previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
       if (evt === 'mouseup') {
         const { x, y } = getPos(e);
+        const base = { id: uid(), owner: clientId, page: currentPageKey(), color: strokeColor, size: normSize() };
         if (currentTool === 'shape') {
-          renderShape(drawCtx, currentShape, shapeStartX, shapeStartY, x, y, strokeColor, strokeSize, shapeFilled);
-          socket && socket.emit('draw-shape', {
-            type: currentShape, x1: shapeStartX, y1: shapeStartY, x2: x, y2: y,
-            color: strokeColor, size: strokeSize, filled: shapeFilled
-          });
+          commitStroke({ ...base, kind: 'shape', shape: currentShape, filled: shapeFilled,
+            points: [toNorm(shapeStartX, shapeStartY), toNorm(x, y)] });
         } else {
-          let ex = x, ey = y;
-          if (currentPenMode === 'snap') {
-            const dx = Math.abs(x - shapeStartX), dy = Math.abs(y - shapeStartY);
-            if (dx >= dy) ey = shapeStartY; else ex = shapeStartX;
-          }
-          renderLine(drawCtx, shapeStartX, shapeStartY, ex, ey, strokeColor, strokeSize);
-          socket && socket.emit('draw-line', {
-            x1: shapeStartX, y1: shapeStartY, x2: ex, y2: ey,
-            color: strokeColor, size: strokeSize
-          });
+          const [ex, ey] = snapEnd(x, y);
+          commitStroke({ ...base, kind: 'line', points: [toNorm(shapeStartX, shapeStartY), toNorm(ex, ey)] });
         }
-        saveSnapshot();
       }
       return;
     }
-    drawCtx.closePath();
-    socket && socket.emit('draw-end');
-    saveSnapshot();
+    myStroke = null;
   })
 );
 
@@ -908,7 +984,9 @@ drawCanvas.addEventListener('touchmove', e => {
 }, { passive: false });
 drawCanvas.addEventListener('touchend', e => {
   e.preventDefault();
-  drawCanvas.dispatchEvent(new MouseEvent('mouseup'));
+  // 손을 뗀 위치를 넘겨야 직선/도형 끝점이 맞음
+  const t = e.changedTouches[0];
+  drawCanvas.dispatchEvent(new MouseEvent('mouseup', t ? { clientX: t.clientX, clientY: t.clientY } : {}));
 }, { passive: false });
 
 // 핀치 줌
@@ -1092,7 +1170,7 @@ function setPencilCursor() {
 function setEraserCursor(size) {
   const rect = drawCanvas.getBoundingClientRect();
   const scale = rect.width > 0 ? rect.width / drawCanvas.width : 1;
-  const px = Math.max(8, Math.min(Math.round(size * scale), 96));
+  const px = Math.max(8, Math.min(Math.round(size * canvasZoom * scale), 96));
   const total = px + 6;
 
   const c = document.createElement('canvas');
@@ -1154,9 +1232,10 @@ function updateHostUI() {
 
 clearAllBtn.addEventListener('click', () => {
   if (!isHost) return;
-  clearDrawCanvas();
-  saveSnapshot();
-  socket && socket.emit('whiteboard-clear');
+  const page = currentPageKey();
+  strokes = strokes.filter(s => s.page !== page);
+  redrawBoard();
+  socket && socket.emit('board-clear', page);
 });
 
 function clearDrawCanvas() {
@@ -1164,31 +1243,45 @@ function clearDrawCanvas() {
   drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
 }
 
-function saveSnapshot() {
-  const dataURL = drawCanvas.toDataURL();
-  drawHistory.push(dataURL);
-  if (drawHistory.length > MAX_HISTORY) drawHistory.shift();
-}
-
+// 현재 페이지에서 내가 마지막으로 그린 획만 취소 (상대 획은 유지)
 function undo() {
-  if (drawHistory.length === 0) return;
-  drawHistory.pop();
-  const prev = drawHistory.length > 0 ? drawHistory[drawHistory.length - 1] : null;
-  applySnapshot(prev);
-  socket && socket.emit('whiteboard-undo', prev);
-}
-
-function applySnapshot(dataURL) {
-  drawCtx.globalCompositeOperation = 'source-over';
-  drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-  if (!dataURL) return;
-  const img = new Image();
-  img.onload = () => drawCtx.drawImage(img, 0, 0);
-  img.src = dataURL;
+  const page = currentPageKey();
+  const mine = strokes.findLast(s => s.owner === clientId && s.page === page);
+  if (!mine) return;
+  strokes = strokes.filter(s => s !== mine);
+  if (myStroke === mine) { myStroke = null; isDrawing = false; }
+  redrawBoard();
+  socket && socket.emit('stroke-undo', mine.id);
 }
 
 function clearPdfCanvas() {
   pdfCtx.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+}
+
+/* ════════════════════════════════════════════
+   서버에서 받은 방 상태 적용 (입장/재접속 시)
+════════════════════════════════════════════ */
+async function applyRoomState({ pdf, pdfPage, strokes: serverStrokes, webUrl }) {
+  strokes = serverStrokes;
+  myStroke = null;
+  isDrawing = false;
+  if (webUrl) navigateWebFrame(webUrl, false);
+
+  if (pdf) {
+    if (pdf.version !== pdfVersion) await loadPdfFromServer(pdf.version);
+    await renderPdfPage(pdfPage);
+  } else if (pdfDoc) {
+    // 서버에 PDF가 없으면 (방이 만료된 경우) 빈 보드로
+    pdfDoc = null;
+    pdfVersion = null;
+    pdfNav.classList.add('hidden');
+    pagesPanel.classList.add('hidden');
+    pagesList.innerHTML = '';
+    clearPdfCanvas();
+    initCanvasSize();
+  } else {
+    redrawBoard();
+  }
 }
 
 /* ════════════════════════════════════════════
@@ -1198,31 +1291,46 @@ pdfBtn.addEventListener('click', () => pdfInput.click());
 
 pdfInput.addEventListener('change', async (e) => {
   const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = async (ev) => {
-    const base64 = ev.target.result;
-    // 상대방에게 전송
-    socket && socket.emit('pdf-upload', { data: base64, name: file.name });
-    await loadPdfFromBase64(base64);
-    showSystemMsg(`PDF 공유됨: ${file.name}`);
-  };
-  reader.readAsDataURL(file);
   pdfInput.value = '';
+  if (!file || !socket) return;
+  showSystemMsg(`PDF 업로드 중: ${file.name}`);
+  try {
+    // 서버에 올리면 서버가 상대방에게 알림 (늦게 들어온 사람도 서버에서 받음)
+    const res = await fetch(`/rooms/${encodeURIComponent(myRoomId)}/pdf`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/pdf',
+        'X-Socket-Id': socket.id,
+        'X-File-Name': encodeURIComponent(file.name)
+      },
+      body: file
+    });
+    if (res.status === 413) { showSystemMsg('PDF가 너무 큽니다 (최대 50MB).'); return; }
+    if (!res.ok) throw new Error(`status ${res.status}`);
+    const { version } = await res.json();
+    strokes = strokes.filter(s => s.page === 0);
+    await loadPdfData(new Uint8Array(await file.arrayBuffer()), version);
+    await renderPdfPage(1);
+    showSystemMsg(`PDF 공유됨: ${file.name}`);
+  } catch (err) {
+    console.error('PDF 업로드 실패:', err);
+    showSystemMsg('PDF 업로드에 실패했습니다.');
+  }
 });
 
-async function loadPdfFromBase64(base64) {
-  const raw = base64.split(',')[1];
-  const binary = atob(raw);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+async function loadPdfFromServer(version) {
+  const res = await fetch(`/rooms/${encodeURIComponent(myRoomId)}/pdf?v=${version}`);
+  if (!res.ok) { showSystemMsg('PDF를 불러오지 못했습니다.'); return; }
+  await loadPdfData(new Uint8Array(await res.arrayBuffer()), version);
+}
 
+async function loadPdfData(bytes, version) {
   pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+  pdfVersion = version;
   pdfTotalPages = pdfDoc.numPages;
   pdfCurrentPage = 1;
   pdfNav.classList.remove('hidden');
   buildPagesList(pdfTotalPages);
-  await renderPdfPage(1);
 }
 
 function buildPagesList(total) {
@@ -1253,11 +1361,13 @@ function updatePagesListActive(pageNum) {
 async function renderPdfPage(pageNum) {
   if (!pdfDoc) return;
   clearTimeout(zoomRenderTimer);
+  const seq = ++pdfRenderSeq;
   pdfCurrentPage = Math.max(1, Math.min(pageNum, pdfTotalPages));
   pdfPageInfo.textContent = `${pdfCurrentPage} / ${pdfTotalPages}`;
   updatePagesListActive(pdfCurrentPage);
 
   const page = await pdfDoc.getPage(pdfCurrentPage);
+  if (seq !== pdfRenderSeq) return; // 그 사이 다른 페이지/줌 렌더링이 시작됨
   const containerW = canvasContainer.clientWidth || 1200;
   const containerH = canvasContainer.clientHeight || 800;
   const viewport0 = page.getViewport({ scale: 1 });
@@ -1268,15 +1378,21 @@ async function renderPdfPage(pageNum) {
   const W = Math.floor(viewport.width);
   const H = Math.floor(viewport.height);
 
-  drawHistory.length = 0;
+  if (pdfRenderTask) pdfRenderTask.cancel();
   [pdfCanvas, drawCanvas, previewCanvas].forEach(c => { c.width = W; c.height = H; });
+  canvasZoom = zoomLevel;
   canvasInner.style.width  = W + 'px';
   canvasInner.style.height = H + 'px';
   canvasInner.style.transform = 'scale(1)'; // CSS 스케일 불필요 — 캔버스 자체가 줌 반영
   canvasWrapper.style.width  = W + 'px';
   canvasWrapper.style.height = H + 'px';
+  if (currentTool === 'eraser') setEraserCursor(strokeSize);
 
-  await page.render({ canvasContext: pdfCtx, viewport }).promise;
+  // 필기는 획 데이터로 다시 그림 → 페이지를 오가거나 확대해도 유지되고 선명함
+  redrawBoard();
+
+  pdfRenderTask = page.render({ canvasContext: pdfCtx, viewport });
+  try { await pdfRenderTask.promise; } catch (_) { /* 취소됨 */ }
 }
 
 pdfPrev.addEventListener('click', () => {
@@ -1367,9 +1483,10 @@ function startRecording() {
       ctx.fillText('REC', W - 50, 21);
     }
 
-    recordAnimFrame = requestAnimationFrame(drawFrame);
   }
   drawFrame();
+  // requestAnimationFrame은 탭이 백그라운드면 멈추므로 타이머 사용 (백그라운드에선 브라우저가 느리게 실행)
+  recordTimer = setInterval(drawFrame, 1000 / 30);
 
   // 오디오 믹싱
   audioCtx = new AudioContext();
@@ -1393,7 +1510,7 @@ function startRecording() {
 
   mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordChunks.push(e.data); };
   mediaRecorder.onstop = async () => {
-    cancelAnimationFrame(recordAnimFrame);
+    clearInterval(recordTimer);
     audioCtx.close();
     const blob = new Blob(recordChunks, { type: 'video/webm' });
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -1469,8 +1586,6 @@ function switchMode(mode) {
     modeWebBtn.classList.add('active');
     modeWbBtn.classList.remove('active');
     clearAllBtn.style.display = 'none';
-    // 신규 입장 시 상대방 현재 URL 요청
-    if (remoteSocketId) socket && socket.emit('request-web-url', remoteSocketId);
   }
 }
 
