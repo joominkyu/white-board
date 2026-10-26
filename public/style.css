@@ -1127,3 +1127,20 @@ body {
 .lobby-icon .ic { width: 40px; height: 40px; color: #22c55e; }
 .tool-btn .ic, .chat-toggle-btn .ic, .remote-ctrl-btn .ic { width: 1.25em; height: 1.25em; vertical-align: -0.3em; }
 .btn-icon .ic { width: 20px; height: 20px; }
+
+/* ── 대기 화면: 학생에게 알림톡 보내기 ── */
+/* 영상 칸이 낮아서 버튼이 보일 땐 아이콘을 숨겨 자리 확보 */
+.waiting-overlay:has(.notify-btn:not(.hidden)) .waiting-icon { display: none; }
+.notify-btn {
+  margin-top: 2px;
+  padding: 6px 12px;
+  border: 1px solid #22c55e;
+  border-radius: 8px;
+  background: transparent;
+  color: #86efac;
+  font-size: 12px;
+  cursor: pointer;
+}
+.notify-btn:hover { background: #14532d; }
+.notify-btn:disabled { opacity: 0.5; cursor: default; }
+.notify-msg { margin-top: 0; font-size: 11px; color: #8892a4; min-height: 14px; }
