@@ -93,6 +93,7 @@ async function loadRoomState(roomId, room) {
     const data = await fetchBoard(roomId);
     room.strokes = data.board?.strokes ?? [];
     room.pdfPage = data.pdfPage ?? 1;
+    room.notifyEnabled = !!data.notifyEnabled;
     if (data.pdf) room.pdf = { buffer: await downloadPdf(data.pdf), name: data.pdf.name, version: Date.now() };
   } catch (e) {
     console.error(`필기 불러오기 실패 (room ${roomId}):`, e.message);
@@ -391,6 +392,7 @@ io.on('connection', (socket) => {
       me: uid,
       users: room.users.map(u => ({ socketId: u.socketId, username: u.username })),
       isHost: room.host === socket.id,
+      canNotify: room.host === socket.id && !!room.notifyEnabled, // 선생님만, 봄노트에 알림톡 템플릿이 있을 때만
       state: roomStatePayload(room)
     });
 
@@ -504,6 +506,23 @@ io.on('connection', (socket) => {
   });
 
   // 방장이 상대방 마이크 제어
+  // 선생님이 대기 화면에서 [학생에게 알림톡 보내기] — 발송은 봄노트가 함 (1분에 1번 제한도 봄노트에서)
+  socket.on('notify-student', async () => {
+    const roomId = socket.data.roomId;
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id || !BOMNOTE_API_URL) return;
+    let result = { ok: false, reason: 'failed' };
+    try {
+      const res = await fetch(bomnoteUrl(`sessions/${encodeURIComponent(roomId)}/notify`), {
+        method: 'POST', headers: { 'X-Live-Secret': LIVE_CLASS_SECRET }
+      });
+      if (res.ok) result = await res.json();
+    } catch (e) {
+      console.error(`알림톡 요청 실패 (room ${roomId}):`, e.message);
+    }
+    socket.emit('notify-result', result);
+  });
+
   socket.on('host-control-mic', ({ muted } = {}) => {
     const room = rooms[socket.data.roomId];
     if (!room || room.host !== socket.id) return;

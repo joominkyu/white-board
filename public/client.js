@@ -141,6 +141,9 @@ const screenView    = document.getElementById('screen-view');
 const screenEmpty   = document.getElementById('screen-empty');
 const screenShareBtn = document.getElementById('screen-share-btn');
 const remoteRecBanner = document.getElementById('remote-rec-banner');
+const notifyBtn = document.getElementById('notify-btn');
+const notifyMsg = document.getElementById('notify-msg');
+let canNotify = false;
 const clearAllBtn = document.getElementById('clear-all-btn');
 
 const recordBtn    = document.getElementById('record-btn');
@@ -233,7 +236,9 @@ async function initApp() {
 ════════════════════════════════════════════ */
 function setupSocketEvents() {
 
-  socket.on('joined', async ({ me, users, isHost: host, state }) => {
+  socket.on('joined', async ({ me, users, isHost: host, canNotify: notifyAllowed, state }) => {
+    canNotify = !!notifyAllowed;
+    updateNotifyButton();
     clientId = me;
     if (mediaRecorder && mediaRecorder.state === 'recording') socket.emit('recording-state', true);
     if (screenTrack) socket.emit('screen-share-state', true);
@@ -273,6 +278,7 @@ function setupSocketEvents() {
   // 상대방이 나중에 들어옴 → 내가 offer를 보냄 (보드 상태는 서버가 직접 전달)
   socket.on('user-joined', async ({ socketId, username }) => {
     remoteSocketId = socketId;
+    updateNotifyButton();
     remoteLabel.textContent = username;
     showSystemMsg(`${username}님이 입장했습니다.`);
     await startCall();
@@ -317,6 +323,7 @@ function setupSocketEvents() {
     statusBadge.className = 'status-badge waiting';
     remoteSocketId = '';
     if (peerConnection) { peerConnection.close(); peerConnection = null; }
+    updateNotifyButton();
     remoteRecBanner.classList.add('hidden');
     if (remoteSharing) {
       remoteSharing = false;
@@ -370,6 +377,23 @@ function setupSocketEvents() {
   });
 
   // 웹 공유
+  // [학생에게 알림톡 보내기] 결과
+  socket.on('notify-result', ({ ok, reason }) => {
+    const msg = ok ? '알림톡을 보냈어요' : {
+      no_phone: '학생 전화번호가 등록되지 않았어요',
+      too_soon: '잠시 후 다시 보낼 수 있어요',
+      ended: '수업이 종료된 상태예요',
+      disabled: '알림톡이 설정되지 않았어요',
+    }[reason] || '발송에 실패했어요';
+    notifyMsg.textContent = msg;
+    if (ok || reason === 'too_soon') {
+      notifyBtn.disabled = true;
+      setTimeout(() => { notifyBtn.disabled = false; notifyMsg.textContent = ''; }, 60 * 1000);
+    } else {
+      notifyBtn.disabled = false;
+    }
+  });
+
   // 상대방 녹화 상태 — 녹화 중이면 상단에 표시
   socket.on('recording-state', ({ recording, username }) => {
     remoteRecBanner.classList.toggle('hidden', !recording);
@@ -450,6 +474,20 @@ function setupSocketEvents() {
 /* ════════════════════════════════════════════
    WebRTC
 ════════════════════════════════════════════ */
+// 선생님이고 학생이 아직 없을 때만 [알림톡 보내기] 표시
+function updateNotifyButton() {
+  const show = canNotify && !remoteSocketId;
+  notifyBtn.classList.toggle('hidden', !show);
+  if (!show) notifyMsg.textContent = '';
+}
+
+notifyBtn.addEventListener('click', () => {
+  if (!socket) return;
+  notifyBtn.disabled = true;
+  notifyMsg.textContent = '보내는 중...';
+  socket.emit('notify-student');
+});
+
 // TURN 자격증명은 서버에서 한 번 받아 재사용
 function getIceConfig() {
   if (!iceConfigPromise) {
