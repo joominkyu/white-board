@@ -1087,6 +1087,9 @@ drawCanvas.addEventListener('pointercancel', e => { if (e.pointerId === activePo
 
 // 핀치 줌
 let pinchStartDist = 0, pinchStartZoom = 1;
+// 길게 눌렀을 때 뜨는 브라우저 메뉴 차단
+canvasContainer.addEventListener('contextmenu', e => e.preventDefault());
+
 canvasContainer.addEventListener('touchstart', e => {
   if (e.touches.length === 2) {
     pinchStartDist = Math.hypot(
