@@ -1710,6 +1710,11 @@ async function setSenderBitrate(sender, maxBitrate) {
 }
 
 async function startScreenShare() {
+  // 패드·폰 브라우저 대부분은 화면 공유 미지원 — 안내 없이 눌러도 아무 반응이 없던 문제
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    alert('이 기기의 브라우저는 화면 공유를 지원하지 않아요. PC에서 공유해 주세요.');
+    return;
+  }
   if (!localStream || !localStream.getVideoTracks()[0]) {
     alert('카메라가 연결된 상태에서만 화면 공유를 할 수 있어요.');
     return;
