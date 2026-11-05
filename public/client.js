@@ -52,6 +52,9 @@ let remoteMicMuted = false;
 let currentTool = 'pen';
 let strokeColor = '#000000';
 let strokeSize = 4;
+// 펜·도형과 지우개는 굵기를 따로 기억
+let drawSize = 4;
+let eraserSize = 20;
 let lastX = 0, lastY = 0;
 let currentShape   = 'rect'; // 'rect' | 'triangle' | 'circle'
 let currentPenMode = 'free'; // 'free' | 'line' | 'snap'
@@ -1002,7 +1005,7 @@ let lastPenAt = 0;
 function strokePoint(e) {
   const { x, y } = getPos(e);
   const p = toNorm(x, y);
-  if (e.pointerType === 'pen') p.push(Math.round(e.pressure * 100) / 100);
+  if (e.pointerType === 'pen' && currentTool !== 'eraser') p.push(Math.round(e.pressure * 100) / 100); // 지우개는 필압 없이 고정 굵기
   return p;
 }
 
@@ -1141,6 +1144,7 @@ const PEN_ICONS = { free: ic('pencil'), line: '╱', snap: '┼' };
 toolPen.addEventListener('click', (e) => {
   e.stopPropagation();
   currentTool = 'pen';
+  applyToolSize();
   toolPen.classList.add('active');
   toolEraser.classList.remove('active');
   toolShapeBtn.classList.remove('active');
@@ -1154,6 +1158,7 @@ penOpts.forEach(btn => {
     e.stopPropagation();
     currentPenMode = btn.dataset.mode;
     currentTool    = 'pen';
+    applyToolSize();
     penPopup.classList.add('hidden');
     toolPen.classList.add('active');
     toolEraser.classList.remove('active');
@@ -1199,6 +1204,7 @@ shapeOpts.forEach(btn => {
     currentShape = btn.dataset.shape;
     shapeFilled  = btn.dataset.filled === 'true';
     currentTool  = 'shape';
+    applyToolSize();
     shapePopup.classList.add('hidden');
     toolPen.classList.remove('active');
     toolEraser.classList.remove('active');
@@ -1292,6 +1298,7 @@ function setEraserCursor(size) {
 /* ────────── 툴 선택 ────────── */
 toolEraser.addEventListener('click', () => {
   currentTool = 'eraser';
+  applyToolSize();
   toolEraser.classList.add('active');
   toolPen.classList.remove('active');
   toolShapeBtn.classList.remove('active');
@@ -1308,8 +1315,15 @@ colorSwatches.forEach(btn => {
   });
 });
 
+function applyToolSize() {
+  strokeSize = currentTool === 'eraser' ? eraserSize : drawSize;
+  sizeSlider.value = strokeSize;
+  sizeDisplay.textContent = strokeSize;
+}
+
 sizeSlider.addEventListener('input', e => {
   strokeSize = parseInt(e.target.value, 10);
+  if (currentTool === 'eraser') eraserSize = strokeSize; else drawSize = strokeSize;
   sizeDisplay.textContent = strokeSize;
   if (currentTool === 'eraser') setEraserCursor(strokeSize);
 });
@@ -1347,6 +1361,8 @@ function undo() {
   redrawBoard();
   socket && socket.emit('stroke-undo', mine.id);
 }
+
+document.getElementById('tool-undo').addEventListener('click', undo);
 
 function clearPdfCanvas() {
   pdfCtx.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
