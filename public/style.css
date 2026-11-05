@@ -1144,3 +1144,7 @@ body {
 .notify-btn:hover { background: #14532d; }
 .notify-btn:disabled { opacity: 0.5; cursor: default; }
 .notify-msg { margin-top: 0; font-size: 11px; color: #8892a4; min-height: 14px; }
+
+/* 패드에서 펜슬을 오래 눌러도 글자 선택·복사 메뉴가 뜨지 않게 (입력칸은 제외) */
+body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+input, textarea { -webkit-user-select: text; user-select: text; }
