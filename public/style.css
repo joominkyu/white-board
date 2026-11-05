@@ -1148,3 +1148,5 @@ body {
 /* 패드에서 펜슬을 오래 눌러도 글자 선택·복사 메뉴가 뜨지 않게 (입력칸은 제외) */
 body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 input, textarea { -webkit-user-select: text; user-select: text; }
+
+.nocam-retry { margin-top: 4px; padding: 4px 10px; border: 1px solid #22c55e; border-radius: 6px; background: transparent; color: #86efac; font-size: 11px; cursor: pointer; }

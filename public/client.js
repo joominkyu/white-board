@@ -197,6 +197,25 @@ joinBtn.addEventListener('click', () => {
   initApp();
 });
 
+// 카메라 권한을 다시 요청 — 성공하면 새로고침해서 카메라를 켠 채로 다시 입장 (필기는 서버에 남아 있음)
+async function retryMedia() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    stream.getTracks().forEach(t => t.stop());
+    location.reload();
+  } catch (e) {
+    alert(mediaErrorMessage(e));
+  }
+}
+
+function mediaErrorMessage(e) {
+  if (e.name === 'NotFoundError') return '카메라나 마이크를 찾을 수 없어요. 기기 연결을 확인해 주세요.';
+  if (e.name === 'NotReadableError') return '다른 앱이 카메라를 쓰고 있어요. 그 앱을 닫고 다시 시도해 주세요.';
+  return '카메라·마이크가 차단되어 있어요.\n\n'
+    + '1. 브라우저 주소창의 사이트 설정(또는 기기 설정)에서 카메라·마이크를 허용해 주세요.\n'
+    + '2. 카카오톡 안에서 열었다면 Safari나 Chrome으로 다시 열어 주세요.';
+}
+
 async function initApp() {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -211,7 +230,8 @@ async function initApp() {
     const nocam = document.createElement('div');
     nocam.className = 'nocam-overlay';
     nocam.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:4px;background:#0a0c14;color:#8892a4;font-size:11px;text-align:center;padding:8px;z-index:1;';
-    nocam.innerHTML = `<span style="font-size:20px">${ic('video-off')}</span><span>카메라/마이크<br>권한을 허용해주세요</span>`;
+    nocam.innerHTML = `<span style="font-size:20px">${ic('video-off')}</span><span>카메라/마이크<br>권한을 허용해주세요</span><button type="button" class="nocam-retry">다시 시도</button>`;
+    nocam.querySelector('.nocam-retry').addEventListener('click', retryMedia);
     localVideo.parentElement.appendChild(nocam);
   }
 
