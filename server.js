@@ -393,6 +393,7 @@ io.on('connection', (socket) => {
       users: room.users.map(u => ({ socketId: u.socketId, username: u.username })),
       isHost: room.host === socket.id,
       canNotify: room.host === socket.id && !!room.notifyEnabled, // 선생님만, 봄노트에 알림톡 템플릿이 있을 때만
+      canNote: room.host === socket.id && !!BOMNOTE_API_URL, // 선생님만, [나가기] 때 수업 기록 창
       state: roomStatePayload(room)
     });
 
@@ -521,6 +522,41 @@ io.on('connection', (socket) => {
       console.error(`알림톡 요청 실패 (room ${roomId}):`, e.message);
     }
     socket.emit('notify-result', result);
+  });
+
+  // 선생님이 [나가기] 때 쓰는 수업 기록 — 봄노트가 그 수업의 학생·날짜로 저장
+  socket.on('lesson-note-get', async (ack) => {
+    if (typeof ack !== 'function') return;
+    const roomId = socket.data.roomId;
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id || !BOMNOTE_API_URL) return ack({ ok: false });
+    try {
+      const res = await fetch(bomnoteUrl(`sessions/${encodeURIComponent(roomId)}/note`), {
+        headers: { 'X-Live-Secret': LIVE_CLASS_SECRET }
+      });
+      ack(res.ok ? { ok: true, content: (await res.json()).content || '' } : { ok: false });
+    } catch (e) {
+      console.error(`수업 기록 조회 실패 (room ${roomId}):`, e.message);
+      ack({ ok: false });
+    }
+  });
+
+  socket.on('lesson-note-save', async ({ content } = {}, ack) => {
+    if (typeof ack !== 'function') return;
+    const roomId = socket.data.roomId;
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id || !BOMNOTE_API_URL) return ack({ ok: false });
+    try {
+      const res = await fetch(bomnoteUrl(`sessions/${encodeURIComponent(roomId)}/note`), {
+        method: 'PUT',
+        headers: { 'X-Live-Secret': LIVE_CLASS_SECRET, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: String(content ?? '').slice(0, 2000) })
+      });
+      ack({ ok: res.ok });
+    } catch (e) {
+      console.error(`수업 기록 저장 실패 (room ${roomId}):`, e.message);
+      ack({ ok: false });
+    }
   });
 
   socket.on('host-control-mic', ({ muted } = {}) => {

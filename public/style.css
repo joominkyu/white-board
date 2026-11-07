@@ -1162,3 +1162,27 @@ input, textarea { -webkit-user-select: text; user-select: text; }
   .action-btn, .nav-btn { min-height: 40px; }
   #size-slider { width: 110px; height: 32px; }
 }
+
+/* ── 수업 기록 창 ── */
+.lesson-note-box { width: 400px; max-width: calc(100vw - 32px); }
+.lesson-note-box .settings-body { padding: 16px 20px; }
+.lesson-note-text {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0f1117;
+  border: 1px solid #3a4055;
+  border-radius: 8px;
+  color: #e0e0e0;
+  font-size: 14px;
+  font-family: inherit;
+  padding: 10px;
+  resize: vertical;
+}
+.lesson-note-text:focus { outline: none; border-color: #22c55e; }
+.lesson-note-hint { font-size: 11px; color: #8892a4; margin-top: 6px; }
+.lesson-note-msg { font-size: 12px; color: #fbbf24; min-height: 16px; margin-top: 4px; }
+.lesson-note-actions { display: flex; gap: 8px; margin-top: 8px; }
+.lesson-note-skip, .lesson-note-save { flex: 1; padding: 10px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+.lesson-note-skip { background: transparent; border: 1px solid #3a4055; color: #c5cde0; }
+.lesson-note-save { background: #16a34a; border: none; color: #fff; font-weight: 600; }
+.lesson-note-save:disabled { opacity: 0.5; cursor: default; }

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <title>봄노트 실시간 수업</title>
-  <link rel="stylesheet" href="style.css?v=13" />
+  <link rel="stylesheet" href="style.css?v=14" />
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true">
@@ -203,6 +203,25 @@
 
     </div>
 
+    <!-- 수업 기록 (선생님이 [나가기]를 누르면) -->
+    <div id="lesson-note-modal" class="settings-modal hidden">
+      <div class="settings-box lesson-note-box">
+        <div class="settings-header">
+          <span>오늘 수업 기록</span>
+          <button id="lesson-note-close" class="settings-close-btn" title="수업으로 돌아가기">✕</button>
+        </div>
+        <div class="settings-body">
+          <textarea id="lesson-note-text" class="lesson-note-text" maxlength="2000" rows="6" placeholder="오늘 배운 내용, 숙제, 학생 상태 등을 적어주세요."></textarea>
+          <p class="lesson-note-hint">학부모 월별 리포트에 그대로 보여져요. 나중에 봄노트 캘린더에서 고칠 수 있어요.</p>
+          <p id="lesson-note-msg" class="lesson-note-msg"></p>
+          <div class="lesson-note-actions">
+            <button id="lesson-note-skip" class="lesson-note-skip">기록 없이 나가기</button>
+            <button id="lesson-note-save" class="lesson-note-save">저장하고 나가기</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 설정 모달 -->
     <div id="settings-modal" class="settings-modal hidden">
       <div class="settings-box">
@@ -289,6 +308,6 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-  <script src="client.js?v=14"></script>
+  <script src="client.js?v=15"></script>
 </body>
 </html>

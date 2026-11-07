@@ -148,6 +148,7 @@ const remoteRecBanner = document.getElementById('remote-rec-banner');
 const notifyBtn = document.getElementById('notify-btn');
 const notifyMsg = document.getElementById('notify-msg');
 let canNotify = false;
+let canNote = false; // 선생님 [나가기] 때 수업 기록 창
 const clearAllBtn = document.getElementById('clear-all-btn');
 
 const recordBtn    = document.getElementById('record-btn');
@@ -270,8 +271,9 @@ async function initApp() {
 ════════════════════════════════════════════ */
 function setupSocketEvents() {
 
-  socket.on('joined', async ({ me, users, isHost: host, canNotify: notifyAllowed, state }) => {
+  socket.on('joined', async ({ me, users, isHost: host, canNotify: notifyAllowed, canNote: noteAllowed, state }) => {
     canNotify = !!notifyAllowed;
+    canNote = !!noteAllowed;
     updateNotifyButton();
     clientId = me;
     if (mediaRecorder && mediaRecorder.state === 'recording') socket.emit('recording-state', true);
@@ -865,7 +867,51 @@ async function emitUserDevices() {
 /* ════════════════════════════════════════════
    나가기
 ════════════════════════════════════════════ */
-leaveBtn.addEventListener('click', leaveRoom);
+leaveBtn.addEventListener('click', () => {
+  if (canNote && socket && socket.connected) openLessonNote();
+  else leaveRoom();
+});
+
+/* ── 수업 기록 (선생님이 [나가기]를 누르면 오늘 수업 내용을 적음) ── */
+const lessonNoteModal = document.getElementById('lesson-note-modal');
+const lessonNoteText  = document.getElementById('lesson-note-text');
+const lessonNoteMsg   = document.getElementById('lesson-note-msg');
+const lessonNoteSave  = document.getElementById('lesson-note-save');
+let lessonNoteLoaded = false; // 기존 기록을 못 불러왔으면 빈 칸 저장으로 지우지 않게
+
+function openLessonNote() {
+  lessonNoteLoaded = false;
+  lessonNoteText.value = '';
+  lessonNoteMsg.textContent = '불러오는 중...';
+  lessonNoteSave.disabled = true;
+  lessonNoteModal.classList.remove('hidden');
+  socket.emit('lesson-note-get', (r) => {
+    lessonNoteSave.disabled = false;
+    if (r && r.ok) {
+      lessonNoteLoaded = true;
+      lessonNoteText.value = r.content || '';
+      lessonNoteMsg.textContent = '';
+    } else {
+      lessonNoteMsg.textContent = '기존 기록을 불러오지 못했어요.';
+    }
+    lessonNoteText.focus();
+  });
+}
+
+function closeLessonNote() { lessonNoteModal.classList.add('hidden'); }
+
+lessonNoteSave.addEventListener('click', () => {
+  if (!lessonNoteLoaded && !lessonNoteText.value.trim()) { closeLessonNote(); leaveRoom(); return; }
+  lessonNoteSave.disabled = true;
+  lessonNoteMsg.textContent = '저장 중...';
+  socket.emit('lesson-note-save', { content: lessonNoteText.value }, (r) => {
+    if (r && r.ok) { closeLessonNote(); leaveRoom(); return; }
+    lessonNoteSave.disabled = false;
+    lessonNoteMsg.textContent = '저장하지 못했어요. 다시 시도하거나 기록 없이 나가 주세요.';
+  });
+});
+document.getElementById('lesson-note-skip').addEventListener('click', () => { closeLessonNote(); leaveRoom(); });
+document.getElementById('lesson-note-close').addEventListener('click', closeLessonNote);
 
 function leaveRoom() {
   if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording();
@@ -1851,7 +1897,7 @@ canvasContainer.addEventListener('wheel', (e) => {
 
 // 키보드 단축키
 window.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); return; }
   if (e.key === 'ArrowLeft') pdfPrev.click();
   if (e.key === 'ArrowRight') pdfNext.click();
