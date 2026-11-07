@@ -55,6 +55,7 @@ let strokeSize = 4;
 // 펜·도형과 지우개는 굵기를 따로 기억
 let drawSize = 4;
 let eraserSize = 20;
+let penButtonPrevTool = null; // S펜 버튼으로 잠깐 지우개를 쓰기 전 도구
 let lastX = 0, lastY = 0;
 let currentShape   = 'rect'; // 'rect' | 'triangle' | 'circle'
 let currentPenMode = 'free'; // 'free' | 'line' | 'snap'
@@ -216,6 +217,15 @@ function mediaErrorMessage(e) {
     + '2. 카카오톡 안에서 열었다면 Safari나 Chrome으로 다시 열어 주세요.';
 }
 
+// 수업 중 패드·폰 화면이 꺼지지 않게 (지원하는 브라우저만, 다른 앱 갔다 오면 다시 요청)
+let wakeLock = null;
+async function keepScreenOn() {
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && wakeLock) keepScreenOn();
+});
+
 async function initApp() {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -249,6 +259,7 @@ async function initApp() {
   roomEl.classList.remove('hidden');
   roomTitle.textContent = '봄노트 실시간 수업';
   initCanvasSize();
+  keepScreenOn();
 
   // 입장 후 기기 목록 공유 (방장이 상대방 기기 설정할 수 있도록)
   setTimeout(emitUserDevices, 1000);
@@ -901,7 +912,10 @@ function leaveRoom() {
 /* ════════════════════════════════════════════
    화이트보드 – 캔버스 초기화
 ════════════════════════════════════════════ */
-function initCanvasSize(w = 1600, h = 900) {
+// 빈 보드(16:9)를 화면 크기에 맞춤 — 패드처럼 작은 화면에서도 처음부터 전체가 보이게
+function initCanvasSize() {
+  const fit = Math.min((canvasContainer.clientWidth || 1600) / 1600, (canvasContainer.clientHeight || 900) / 900, 2);
+  const w = Math.floor(1600 * fit), h = Math.floor(900 * fit);
   [pdfCanvas, drawCanvas, previewCanvas].forEach(c => { c.width = w; c.height = h; });
   canvasZoom = 1;
   canvasInner.style.width  = w + 'px';
@@ -1037,6 +1051,12 @@ drawCanvas.addEventListener('pointerdown', e => {
   // 두 번째 손가락(핀치 줌 등)이 닿으면 그리던 획을 마무리
   if (activePointerId !== null) { finishDrawing(e, false); return; }
   activePointerId = e.pointerId;
+  // S펜 옆 버튼(또는 지우개 끝)을 누른 채 쓰면 그 획만 지우개
+  if (e.pointerType === 'pen' && (e.buttons & 34) && currentTool !== 'eraser') {
+    penButtonPrevTool = currentTool;
+    currentTool = 'eraser';
+    strokeSize = eraserSize;
+  }
   // 캔버스 밖으로 나가도 획이 끊기지 않도록 (포인터가 이미 해제됐으면 실패해도 그리기는 계속)
   try { drawCanvas.setPointerCapture(e.pointerId); } catch (_) {}
 
@@ -1100,13 +1120,18 @@ function finishDrawing(e, commit) {
     return;
   }
   myStroke = null;
+  if (penButtonPrevTool) { currentTool = penButtonPrevTool; strokeSize = drawSize; penButtonPrevTool = null; }
 }
 
 drawCanvas.addEventListener('pointerup', e => { if (e.pointerId === activePointerId) finishDrawing(e, true); });
 drawCanvas.addEventListener('pointercancel', e => { if (e.pointerId === activePointerId) finishDrawing(e, false); });
 
 // 핀치 줌
-let pinchStartDist = 0, pinchStartZoom = 1;
+let pinchStartDist = 0, pinchStartZoom = 1, pinchStartMid = null, pinchStartScroll = null;
+function touchMid(t) {
+  const r = canvasContainer.getBoundingClientRect();
+  return { x: (t[0].clientX + t[1].clientX) / 2 - r.left, y: (t[0].clientY + t[1].clientY) / 2 - r.top };
+}
 // 길게 눌렀을 때 뜨는 브라우저 메뉴 차단
 canvasContainer.addEventListener('contextmenu', e => e.preventDefault());
 
@@ -1117,6 +1142,8 @@ canvasContainer.addEventListener('touchstart', e => {
       e.touches[0].clientY - e.touches[1].clientY
     );
     pinchStartZoom = zoomLevel;
+    pinchStartMid = touchMid(e.touches);
+    pinchStartScroll = { left: canvasContainer.scrollLeft, top: canvasContainer.scrollTop };
   }
 }, { passive: true });
 canvasContainer.addEventListener('touchmove', e => {
@@ -1133,7 +1160,22 @@ canvasContainer.addEventListener('touchmove', e => {
     showZoomIndicator();
     if (currentTool === 'eraser') setEraserCursor(strokeSize);
   }
+  // 두 손가락 사이 지점이 손가락을 따라가도록 스크롤 → 확대 기준점 + 두 손가락 이동
+  const mid = touchMid(e.touches);
+  const ratio = zoomLevel / pinchStartZoom;
+  canvasContainer.scrollLeft = (pinchStartScroll.left + pinchStartMid.x) * ratio - mid.x;
+  canvasContainer.scrollTop  = (pinchStartScroll.top  + pinchStartMid.y) * ratio - mid.y;
 }, { passive: false });
+
+// 패드 회전·창 크기 변경 시 보드를 다시 화면에 맞춤
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (roomEl.classList.contains('hidden')) return;
+    if (pdfDoc) renderPdfPage(pdfCurrentPage); else initCanvasSize();
+  }, 200);
+});
 
 function getPos(e) {
   const rect = drawCanvas.getBoundingClientRect();

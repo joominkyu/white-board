@@ -9,6 +9,7 @@ body {
   background: #0f1117;
   color: #e0e0e0;
   height: 100vh;
+  height: 100dvh; /* 패드·폰 주소창에 아래가 가리지 않게 */
   overflow: hidden;
 }
 
@@ -20,6 +21,7 @@ body {
   align-items: center;
   justify-content: center;
   height: 100vh;
+  height: 100dvh; /* 패드·폰 주소창에 아래가 가리지 않게 */
   background: linear-gradient(135deg, #0f1117 0%, #1a1f2e 100%);
 }
 
@@ -105,6 +107,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh; /* 패드·폰 주소창에 아래가 가리지 않게 */
 }
 
 .room-header {
@@ -985,7 +988,8 @@ body {
 /* ════════════════════════════════════════════
    모바일 반응형 (≤ 768px)
 ════════════════════════════════════════════ */
-@media (max-width: 768px) {
+/* 폰, 그리고 세로로 든 패드: 캠을 위 가로 띠로 올려 보드를 넓게 */
+@media (max-width: 768px), (orientation: portrait) and (pointer: coarse) {
 
   body { overflow: hidden; }
 
@@ -1150,3 +1154,11 @@ body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none
 input, textarea { -webkit-user-select: text; user-select: text; }
 
 .nocam-retry { margin-top: 4px; padding: 4px 10px; border: 1px solid #22c55e; border-radius: 6px; background: transparent; color: #86efac; font-size: 11px; cursor: pointer; }
+
+/* 터치 기기: 손가락·펜슬로 누르기 쉽게 버튼을 키움 */
+@media (pointer: coarse) {
+  .color-swatch { width: 32px; height: 32px; }
+  .tool-btn { min-width: 44px; min-height: 40px; }
+  .action-btn, .nav-btn { min-height: 40px; }
+  #size-slider { width: 110px; height: 32px; }
+}
