@@ -38,6 +38,13 @@ function uid() {
 let socket, localStream, peerConnection;
 let myUsername = '', myRoomId = '', remoteSocketId = '';
 let hasJoined = false;
+let inRoom = false;          // 수업방에 들어가 있어 필기를 바로 보낼 수 있음
+let disconnectedAt = 0;      // 마지막으로 서버 연결이 끊긴 시각
+const strokeSentAt = new Map(); // 내 획 id → 마지막으로 보낸(보내려던) 시각 — 끊긴 사이 빠진 획을 다시 보낼 때 사용
+// 연결이 죽은 줄 모르고 보낸 획까지 챙기기 위해, 끊기기 전 이 시간 안에 보낸 획도 다시 확인 (서버 응답 대기 60초 + 여유)
+const RESEND_WINDOW_MS = 90 * 1000;
+let lastCallRestartAt = 0;
+const CALL_RECOVER_MS = 5000; // 영상이 이 시간 넘게 불안정하면 다시 연결
 let iceConfigPromise = null;
 let pendingCandidates = [];
 let isOfferer = false;
@@ -147,6 +154,7 @@ const screenShareBtn = document.getElementById('screen-share-btn');
 const remoteRecBanner = document.getElementById('remote-rec-banner');
 const notifyBtn = document.getElementById('notify-btn');
 const notifyMsg = document.getElementById('notify-msg');
+const reconnectCallBtn = document.getElementById('reconnect-call-btn');
 let canNotify = false;
 let canNote = false; // 선생님 [나가기] 때 수업 기록 창
 const clearAllBtn = document.getElementById('clear-all-btn');
@@ -272,6 +280,9 @@ async function initApp() {
 function setupSocketEvents() {
 
   socket.on('joined', async ({ me, users, isHost: host, canNotify: notifyAllowed, canNote: noteAllowed, state }) => {
+    // 서버 상태로 덮어쓰기 전에, 끊기기 직전~끊긴 동안 쓴 내 획을 챙겨 둠
+    const since = disconnectedAt - RESEND_WINDOW_MS;
+    const unsent = hasJoined ? strokes.filter(s => (strokeSentAt.get(s.id) || 0) >= since) : [];
     canNotify = !!notifyAllowed;
     canNote = !!noteAllowed;
     updateNotifyButton();
@@ -287,13 +298,21 @@ function setupSocketEvents() {
       remoteSocketId = others[0].socketId;
       remoteLabel.textContent = others[0].username;
     }
+    updateNotifyButton();
     await applyRoomState(state);
+    resendStrokes(unsent);
+    inRoom = true;
   });
 
   socket.on('disconnect', (reason) => {
+    inRoom = false;
+    disconnectedAt = Date.now();
     // 직접 나간 경우(io client disconnect)는 안내하지 않음
     if (reason !== 'io client disconnect') showSystemMsg('서버 연결이 끊겼습니다. 다시 연결하는 중...');
   });
+
+  // 학생이 영상 끊김을 알아채고 요청 → 선생님이 다시 연결
+  socket.on('call-restart-request', () => { if (isHost) requestCallRestart(); });
 
   socket.on('host-transferred', () => {
     isHost = true;
@@ -312,11 +331,11 @@ function setupSocketEvents() {
   });
 
   // 상대방이 나중에 들어옴 → 내가 offer를 보냄 (보드 상태는 서버가 직접 전달)
-  socket.on('user-joined', async ({ socketId, username }) => {
+  socket.on('user-joined', async ({ socketId, username, rejoined }) => {
     remoteSocketId = socketId;
     updateNotifyButton();
     remoteLabel.textContent = username;
-    showSystemMsg(`${username}님이 입장했습니다.`);
+    if (!rejoined) showSystemMsg(`${username}님이 입장했습니다.`); // 잠깐 끊겼다 돌아온 경우는 영상만 다시 연결
     await startCall();
   });
 
@@ -515,6 +534,23 @@ function updateNotifyButton() {
   const show = canNotify && !remoteSocketId;
   notifyBtn.classList.toggle('hidden', !show);
   if (!show) notifyMsg.textContent = '';
+  // 학생이 방에 있는데 영상이 안 붙었을 때 선생님이 직접 다시 연결
+  reconnectCallBtn.classList.toggle('hidden', !(isHost && remoteSocketId));
+}
+
+reconnectCallBtn.addEventListener('click', () => {
+  lastCallRestartAt = 0;
+  showSystemMsg('영상을 다시 연결하는 중...');
+  requestCallRestart();
+});
+
+// 영상 다시 연결 — 선생님이면 직접 걸고, 학생이면 선생님에게 요청. 5초에 한 번만
+function requestCallRestart() {
+  if (!socket || !remoteSocketId) return;
+  if (Date.now() - lastCallRestartAt < CALL_RECOVER_MS) return;
+  lastCallRestartAt = Date.now();
+  if (isHost) startCall();
+  else socket.emit('call-restart-request');
 }
 
 notifyBtn.addEventListener('click', () => {
@@ -610,10 +646,17 @@ async function createPeerConnection() {
     }
   };
 
+  let unstableTimer = null;
   peerConnection.oniceconnectionstatechange = () => {
-    if (pc.iceConnectionState === 'failed' && isOfferer && peerConnection === pc) {
-      // ICE 실패 시 offer 쪽에서 새로 협상 (상대는 offer를 받으면 연결을 새로 만듦)
-      setTimeout(() => { if (peerConnection === pc) startCall(); }, 1000);
+    if (peerConnection !== pc) return;
+    clearTimeout(unstableTimer);
+    const s = pc.iceConnectionState;
+    // 어느 쪽이 알아채든 다시 연결 (실패하면 바로, 불안정(disconnected)이 5초 넘게 이어져도)
+    if (s === 'failed') requestCallRestart();
+    else if (s === 'disconnected') {
+      unstableTimer = setTimeout(() => {
+        if (peerConnection === pc && pc.iceConnectionState === 'disconnected') requestCallRestart();
+      }, CALL_RECOVER_MS);
     }
   };
 
@@ -926,6 +969,7 @@ function leaveRoom() {
   pendingCandidates = [];
   iceConfigPromise = null;
   hasJoined = false;
+  inRoom = false;
   remoteSocketId = '';
   if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
   if (micAudioCtx) { micAudioCtx.close(); micAudioCtx = null; }
@@ -1059,7 +1103,29 @@ function redrawBoard() {
 function commitStroke(stroke) {
   strokes.push(stroke);
   drawStroke(drawCtx, stroke);
-  socket && socket.emit('stroke-start', stroke);
+  emitStroke('stroke-start', stroke, stroke.id);
+}
+
+// 필기 전송 — 수업방에 있을 때만 보내고, 보낸 시각을 기록해 두었다가 다시 연결되면 빠진 것을 다시 보냄
+function emitStroke(event, data, id) {
+  strokeSentAt.set(id, Date.now());
+  if (socket && inRoom) socket.emit(event, data);
+}
+
+// 다시 들어온 뒤: 서버에 없거나 덜 저장된 내 획을 다시 보내고 화면에도 되살림
+function resendStrokes(list) {
+  for (const s of list) {
+    const saved = strokes.find(x => x.id === s.id);
+    if (!saved) {
+      strokes.push(s);
+      socket.emit('stroke-start', s);
+    } else if (saved.points.length < s.points.length) {
+      socket.emit('stroke-points', { id: s.id, points: s.points.slice(saved.points.length) });
+      saved.points = s.points;
+    }
+  }
+  strokeSentAt.clear();
+  if (list.length) redrawBoard();
 }
 
 /* ────────── 그리기 이벤트 ────────── */
@@ -1123,7 +1189,7 @@ drawCanvas.addEventListener('pointerdown', e => {
   };
   strokes.push(myStroke);
   drawSegment(myStroke, p, p);
-  socket && socket.emit('stroke-start', myStroke);
+  emitStroke('stroke-start', myStroke, myStroke.id);
 });
 
 drawCanvas.addEventListener('pointermove', e => {
@@ -1150,7 +1216,7 @@ drawCanvas.addEventListener('pointermove', e => {
     drawSegment(myStroke, prev, p);
     added.push(p);
   }
-  socket && socket.emit('stroke-points', { id: myStroke.id, points: added });
+  emitStroke('stroke-points', { id: myStroke.id, points: added }, myStroke.id);
 });
 
 function finishDrawing(e, commit) {

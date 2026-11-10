@@ -23,7 +23,8 @@ const app = express();
 const server = http.createServer(app);
 // 페이지와 소켓을 같은 주소에서 서비스하므로 CORS 허용 불필요.
 // PDF는 HTTP로 업로드하므로 소켓 메시지 크기는 기본값(1MB) 사용
-const io = new Server(server);
+// 약한 와이파이에서 신호가 잠깐 막혀도 끊긴 것으로 보지 않도록 응답을 60초까지 기다림 (기본 20초)
+const io = new Server(server, { pingInterval: 10000, pingTimeout: 60000 });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -31,6 +32,7 @@ const MAX_PDF_BYTES = 50 * 1024 * 1024;
 const MAX_STROKES_PER_ROOM = 10000;
 const MAX_POINTS_PER_STROKE = 5000;
 const ROOM_EXPIRE_MS = 10 * 60 * 1000; // 모두 나간 뒤 방 상태 보관 시간 (재접속 대비)
+const REJOIN_GRACE_MS = 15 * 1000; // 연결이 끊겨도 이 시간 안에 다시 들어오면 나간 것으로 처리하지 않음
 
 // rooms: {
 //   roomId(봄노트 수업 ID): {
@@ -364,11 +366,13 @@ io.on('connection', (socket) => {
     await room.ready; // 저장된 필기·PDF 불러오기 (서버 재시작 후 첫 입장)
     if (!socket.connected) return;
 
-    // 재접속·새 탭: 같은 사람의 이전 소켓이 남아 있으면 정리
+    // 재접속·새 탭: 같은 사람의 이전 연결이 남아 있으면 조용히 교체 (상대에게 "나갔습니다"를 띄우지 않고 사용 시간도 이어서 계산)
     const stale = room.users.find(u => u.uid === uid && u.socketId !== socket.id);
     if (stale) {
+      clearTimeout(stale.leaveTimer);
+      room.users = room.users.filter(u => u !== stale);
+      if (room.host === stale.socketId) room.host = null;
       const staleSocket = io.sockets.sockets.get(stale.socketId);
-      removeUser(roomId, stale.socketId);
       if (staleSocket) { staleSocket.data.roomId = null; staleSocket.disconnect(true); }
     }
 
@@ -383,9 +387,9 @@ io.on('connection', (socket) => {
     socket.data.roomId = roomId;
     socket.data.username = username;
     socket.data.clientId = uid; // 획 주인 식별 (재접속해도 같은 사람)
-    if (room.users.length === 2) room.pairedSince = Date.now();
+    if (room.users.length === 2 && !room.pairedSince) room.pairedSince = Date.now();
 
-    socket.to(roomId).emit('user-joined', { socketId: socket.id, username });
+    socket.to(roomId).emit('user-joined', { socketId: socket.id, username, rejoined: !!stale });
 
     socket.emit('joined', {
       roomId,
@@ -430,6 +434,12 @@ io.on('connection', (socket) => {
   socket.on('ice-candidate', ({ candidate, to } = {}) => {
     if (!isRoommate(socket, to)) return;
     io.to(to).emit('ice-candidate', { candidate, from: socket.id });
+  });
+  // 학생 쪽이 영상 끊김을 알아채면 선생님에게 다시 연결을 요청 (다시 연결은 항상 선생님이 걸어서 양쪽이 동시에 걸지 않게)
+  socket.on('call-restart-request', () => {
+    const room = rooms[socket.data.roomId];
+    if (!room || !room.host || room.host === socket.id) return;
+    io.to(room.host).emit('call-restart-request');
   });
 
   // ── 텍스트 채팅 ──
@@ -588,9 +598,14 @@ io.on('connection', (socket) => {
     socket.to(socket.data.roomId).emit('pdf-page-change', page);
   });
 
-  socket.on('disconnect', () => {
-    if (socket.data.roomId) removeUser(socket.data.roomId, socket.id);
-    console.log('disconnected:', socket.id);
+  socket.on('disconnect', (reason) => {
+    console.log('disconnected:', socket.id, reason); // ping timeout = 응답 없음, transport close/error = 연결 닫힘
+    const roomId = socket.data.roomId;
+    if (!roomId) return;
+    // [나가기]로 직접 나간 경우는 바로, 연결이 끊긴 경우는 다시 들어올 때까지 잠깐 기다림
+    if (reason === 'client namespace disconnect') { removeUser(roomId, socket.id); return; }
+    const user = rooms[roomId]?.users.find(u => u.socketId === socket.id);
+    if (user) user.leaveTimer = setTimeout(() => removeUser(roomId, socket.id), REJOIN_GRACE_MS);
   });
 });
 
