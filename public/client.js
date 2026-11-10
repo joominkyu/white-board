@@ -1077,6 +1077,7 @@ function snapEnd(x, y) {
 
 // 마우스·터치·펜을 Pointer Events 하나로 처리
 let activePointerId = null;
+let activePointerType = null;
 // 손바닥 인식: 펜을 쓰는 동안(마지막 펜 입력 후 10초)에는 손가락·손바닥 터치로 그리지 않음
 const PEN_HOLD_MS = 10 * 1000;
 let lastPenAt = 0;
@@ -1094,9 +1095,14 @@ drawCanvas.addEventListener('pointerdown', e => {
   if (e.pointerType === 'pen') lastPenAt = Date.now();
   if (e.pointerType === 'touch' && Date.now() - lastPenAt < PEN_HOLD_MS) return;
   if (e.pointerType === 'mouse' && e.button !== 0) return;
-  // 두 번째 손가락(핀치 줌 등)이 닿으면 그리던 획을 마무리
-  if (activePointerId !== null) { finishDrawing(e, false); return; }
+  if (activePointerId !== null) {
+    // 두 번째 손가락(핀치 줌 등)이 닿으면 그리던 획을 마무리
+    finishDrawing(e, false);
+    // 펜은 한 번에 하나뿐 → 앞 획이 끝난 신호를 놓친 것이므로 이 펜 입력으로 새 획 시작
+    if (!(e.pointerType === 'pen' && activePointerType === 'pen')) return;
+  }
   activePointerId = e.pointerId;
+  activePointerType = e.pointerType;
   // S펜 옆 버튼(또는 지우개 끝)을 누른 채 쓰면 그 획만 지우개
   if (e.pointerType === 'pen' && (e.buttons & 34) && currentTool !== 'eraser') {
     penButtonPrevTool = currentTool;
@@ -1193,6 +1199,8 @@ canvasContainer.addEventListener('touchstart', e => {
   }
 }, { passive: true });
 canvasContainer.addEventListener('touchmove', e => {
+  // 보드 위 한 손가락·펜 움직임은 브라우저 기본 동작을 막음 → iPad 손글씨 인식(Scribble)이 펜 입력을 가로채지 못하게
+  if (e.touches.length === 1) { if (e.target === drawCanvas) e.preventDefault(); return; }
   if (e.touches.length !== 2) return;
   e.preventDefault();
   const dist = Math.hypot(
