@@ -70,6 +70,9 @@ let shapeStartX = 0, shapeStartY = 0;
 
 // PDF 상태
 let pdfDoc = null, pdfCurrentPage = 1, pdfTotalPages = 0, pdfVersion = null;
+// PDF를 내려받는 동안 상대가 넘긴 페이지 — 다 받은 뒤 이 페이지로 이동 (예전에는 무시하고 1쪽에 머물렀음)
+let pdfLoading = false, remotePdfPage = 1;
+let pendingPdfPage = null; // 연결이 끊긴 동안 내가 넘긴 페이지 — 다시 들어간 뒤 알림
 let pdfRenderSeq = 0, pdfRenderTask = null;
 
 // 줌
@@ -299,9 +302,16 @@ function setupSocketEvents() {
       remoteLabel.textContent = others[0].username;
     }
     updateNotifyButton();
-    await applyRoomState(state);
+    // 끊긴 동안 내가 넘긴 페이지가 있으면 (같은 PDF일 때) 서버 페이지 대신 그 페이지로
+    const myPage = state.pdf && state.pdf.version === pdfVersion ? pendingPdfPage : null;
+    pendingPdfPage = null;
+    if (myPage) state.pdfPage = myPage;
+    // 서버 필기는 바로 반영되므로, PDF 그리기(화면이 가려져 있으면 멈춤)를 기다리지 않고 바로 필기를 다시 보내고 전송을 재개
+    const applied = applyRoomState(state);
     resendStrokes(unsent);
     inRoom = true;
+    if (myPage) emitPdfPage(myPage);
+    await applied;
   });
 
   socket.on('disconnect', (reason) => {
@@ -424,11 +434,15 @@ function setupSocketEvents() {
   socket.on('pdf-updated', async ({ name, version }) => {
     showSystemMsg(`상대방이 PDF를 공유했습니다: ${name}`);
     strokes = strokes.filter(s => s.page === 0);
+    remotePdfPage = 1;
+    pdfLoading = true;
     await loadPdfFromServer(version);
-    await renderPdfPage(1);
+    pdfLoading = false;
+    await renderPdfPage(remotePdfPage);
   });
   socket.on('pdf-page-change', (page) => {
-    if (pdfDoc) renderPdfPage(page);
+    remotePdfPage = page;
+    if (pdfDoc && !pdfLoading) renderPdfPage(page);
   });
 
   // 웹 공유
@@ -1563,8 +1577,13 @@ async function applyRoomState({ pdf, pdfPage, strokes: serverStrokes }) {
   isDrawing = false;
 
   if (pdf) {
-    if (pdf.version !== pdfVersion) await loadPdfFromServer(pdf.version);
-    await renderPdfPage(pdfPage);
+    remotePdfPage = pdfPage;
+    if (pdf.version !== pdfVersion) {
+      pdfLoading = true;
+      await loadPdfFromServer(pdf.version);
+      pdfLoading = false;
+    }
+    await renderPdfPage(remotePdfPage);
   } else if (pdfDoc) {
     // 서버에 PDF가 없으면 (방이 만료된 경우) 빈 보드로
     pdfDoc = null;
@@ -1614,9 +1633,21 @@ pdfInput.addEventListener('change', async (e) => {
 });
 
 async function loadPdfFromServer(version) {
-  const res = await fetch(`/rooms/${encodeURIComponent(myRoomId)}/pdf?v=${version}`, { headers: { 'X-Socket-Id': socket.id } });
-  if (!res.ok) { showSystemMsg('PDF를 불러오지 못했습니다.'); return; }
-  await loadPdfData(new Uint8Array(await res.arrayBuffer()), version);
+  // 약한 와이파이에서 한 번 실패해도 2초 간격으로 3번까지 다시 시도
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`/rooms/${encodeURIComponent(myRoomId)}/pdf?v=${version}`, { headers: { 'X-Socket-Id': socket.id } });
+      if (res.ok) { await loadPdfData(new Uint8Array(await res.arrayBuffer()), version); return; }
+    } catch (_) {}
+    if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+  }
+  showSystemMsg('PDF를 불러오지 못했습니다.');
+}
+
+// 내가 넘긴 페이지를 상대에게 알림 — 연결이 끊긴 동안이면 기억했다가 다시 들어간 뒤 알림
+function emitPdfPage(page) {
+  if (socket && inRoom) socket.emit('pdf-page-change', page);
+  else pendingPdfPage = page;
 }
 
 async function loadPdfData(bytes, version) {
@@ -1638,7 +1669,7 @@ function buildPagesList(total) {
     btn.addEventListener('click', () => {
       const page = parseInt(btn.dataset.page, 10);
       renderPdfPage(page);
-      socket && socket.emit('pdf-page-change', page);
+      emitPdfPage(page);
     });
     pagesList.appendChild(btn);
   }
@@ -1693,13 +1724,13 @@ async function renderPdfPage(pageNum) {
 pdfPrev.addEventListener('click', () => {
   if (!pdfDoc || pdfCurrentPage <= 1) return;
   renderPdfPage(pdfCurrentPage - 1);
-  socket && socket.emit('pdf-page-change', pdfCurrentPage);
+  emitPdfPage(pdfCurrentPage);
 });
 
 pdfNext.addEventListener('click', () => {
   if (!pdfDoc || pdfCurrentPage >= pdfTotalPages) return;
   renderPdfPage(pdfCurrentPage + 1);
-  socket && socket.emit('pdf-page-change', pdfCurrentPage);
+  emitPdfPage(pdfCurrentPage);
 });
 
 /* ════════════════════════════════════════════
