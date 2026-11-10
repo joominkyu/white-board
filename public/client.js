@@ -51,9 +51,9 @@ let isHost = false;
 let remoteMicMuted = false;
 let currentTool = 'pen';
 let strokeColor = '#000000';
-let strokeSize = 4;
+let strokeSize = 1;
 // 펜·도형과 지우개는 굵기를 따로 기억
-let drawSize = 4;
+let drawSize = 1;
 let eraserSize = 20;
 let penButtonPrevTool = null; // S펜 버튼으로 잠깐 지우개를 쓰기 전 도구
 let lastX = 0, lastY = 0;
