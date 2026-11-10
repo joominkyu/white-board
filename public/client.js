@@ -73,6 +73,8 @@ let pdfDoc = null, pdfCurrentPage = 1, pdfTotalPages = 0, pdfVersion = null;
 // PDF를 내려받는 동안 상대가 넘긴 페이지 — 다 받은 뒤 이 페이지로 이동 (예전에는 무시하고 1쪽에 머물렀음)
 let pdfLoading = false, remotePdfPage = 1;
 let pendingPdfPage = null; // 연결이 끊긴 동안 내가 넘긴 페이지 — 다시 들어간 뒤 알림
+// 선생님 화면 따라가기: 선생님이 확대·이동하면 학생 화면이 같은 부분을 보여줌
+let remoteView = null, viewSendTimer = null;
 let pdfRenderSeq = 0, pdfRenderTask = null;
 
 // 줌
@@ -311,7 +313,10 @@ function setupSocketEvents() {
     resendStrokes(unsent);
     inRoom = true;
     if (myPage) emitPdfPage(myPage);
+    remoteView = state.view;
+    sendView();
     await applied;
+    applyRemoteView(); // PDF를 다 그린 뒤 (페이지 크기가 정해진 뒤) 맞춤
   });
 
   socket.on('disconnect', (reason) => {
@@ -439,10 +444,15 @@ function setupSocketEvents() {
     await loadPdfFromServer(version);
     pdfLoading = false;
     await renderPdfPage(remotePdfPage);
+    applyRemoteView();
+  });
+  socket.on('view-change', (view) => {
+    remoteView = view;
+    applyRemoteView();
   });
   socket.on('pdf-page-change', (page) => {
     remotePdfPage = page;
-    if (pdfDoc && !pdfLoading) renderPdfPage(page);
+    if (pdfDoc && !pdfLoading) renderPdfPage(page).then(applyRemoteView); // 페이지 크기가 다를 수 있어 다시 맞춤
   });
 
   // 웹 공유
@@ -1042,7 +1052,46 @@ function applyZoom() {
     clearTimeout(zoomRenderTimer);
     zoomRenderTimer = setTimeout(() => renderPdfPage(pdfCurrentPage), 300);
   }
+  sendView();
 }
+
+// 화면 가운데가 페이지의 어디인지 (0~1) — 화면 크기가 달라도 같은 부분을 가리킴
+function currentView() {
+  const box = canvasContainer.getBoundingClientRect();
+  const page = drawCanvas.getBoundingClientRect(); // 확대(CSS 배율) 반영된 실제 크기
+  const clamp = (v) => Math.min(1, Math.max(0, v));
+  return {
+    zoom: zoomLevel,
+    cx: clamp((box.left + box.width / 2 - page.left) / page.width),
+    cy: clamp((box.top + box.height / 2 - page.top) / page.height)
+  };
+}
+
+// 선생님만, 움직이는 동안 0.1초에 한 번
+function sendView() {
+  if (!isHost || !socket || !inRoom || viewSendTimer) return;
+  viewSendTimer = setTimeout(() => {
+    viewSendTimer = null;
+    if (isHost && socket && inRoom) socket.emit('view-change', currentView());
+  }, 100);
+}
+
+// 학생: 선생님과 같은 배율로 확대하고, 선생님 화면 가운데였던 지점을 내 화면 가운데로
+function applyRemoteView() {
+  if (isHost || !remoteView || pdfLoading) return;
+  if (zoomLevel !== remoteView.zoom) {
+    zoomLevel = remoteView.zoom;
+    applyZoom();
+    if (currentTool === 'eraser') setEraserCursor(strokeSize);
+  }
+  const box = canvasContainer.getBoundingClientRect();
+  const page = drawCanvas.getBoundingClientRect();
+  canvasContainer.scrollLeft += page.left + remoteView.cx * page.width - (box.left + box.width / 2);
+  canvasContainer.scrollTop  += page.top  + remoteView.cy * page.height - (box.top + box.height / 2);
+}
+
+// 선생님이 손가락·스크롤바로 움직여도 보냄
+canvasContainer.addEventListener('scroll', sendView, { passive: true });
 
 function showZoomIndicator() {
   zoomIndicator.textContent = Math.round(zoomLevel * 100) + '%';
