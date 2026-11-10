@@ -1458,6 +1458,7 @@ function updateHostUI() {
 
 clearAllBtn.addEventListener('click', () => {
   if (!isHost) return;
+  if (!confirm('이 페이지 필기를 모두 지울까요? 되돌릴 수 없어요.')) return;
   const page = currentPageKey();
   strokes = strokes.filter(s => s.page !== page);
   redrawBoard();
