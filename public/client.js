@@ -1877,25 +1877,33 @@ function startRecording() {
   const tracks = [videoTrack, ...dest.stream.getAudioTracks()].filter(Boolean);
   const recStream = new MediaStream(tracks);
 
-  const mimeType = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
-    .find(t => MediaRecorder.isTypeSupported(t)) || '';
+  // MP4(H.264+AAC)를 우선 — 휴대폰·카카오톡 등 어디서나 재생되고 길이·탐색도 정상. 지원 안 하는 브라우저는 WebM
+  const mimeType = [
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4',
+    'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'
+  ].find(t => MediaRecorder.isTypeSupported(t)) || '';
 
-  mediaRecorder = new MediaRecorder(recStream, mimeType ? { mimeType } : {});
+  const recorder = new MediaRecorder(recStream, mimeType ? { mimeType } : {});
+  mediaRecorder = recorder;
   recordChunks = [];
 
-  mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordChunks.push(e.data); };
-  mediaRecorder.onstop = async () => {
+  recorder.ondataavailable = e => { if (e.data.size > 0) recordChunks.push(e.data); };
+  recorder.onstop = async () => {
     clearInterval(recordTimer);
     audioCtx.close();
-    const blob = new Blob(recordChunks, { type: 'video/webm' });
+    // 브라우저가 실제로 녹화한 형식에 맞춰 파일 종류·확장자를 정함 (예전에는 항상 .webm)
+    const type = (recorder.mimeType || mimeType || 'video/webm').split(';')[0];
+    const isMp4 = type === 'video/mp4';
+    const ext = isMp4 ? 'mp4' : 'webm';
+    const blob = new Blob(recordChunks, { type });
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const suggestedName = `recording-${ts}.webm`;
+    const suggestedName = `recording-${ts}.${ext}`;
 
     if (window.showSaveFilePicker) {
       try {
         const handle = await window.showSaveFilePicker({
           suggestedName,
-          types: [{ description: 'WebM 동영상', accept: { 'video/webm': ['.webm'] } }]
+          types: [{ description: isMp4 ? 'MP4 동영상' : 'WebM 동영상', accept: { [type]: [`.${ext}`] } }]
         });
         const writable = await handle.createWritable();
         await writable.write(blob);
@@ -1908,7 +1916,7 @@ function startRecording() {
     }
   };
 
-  mediaRecorder.start(500);
+  recorder.start(500);
   socket && socket.emit('recording-state', true);
   recStartTime = Date.now();
 
