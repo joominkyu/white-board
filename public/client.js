@@ -26,6 +26,10 @@ const ic = (name) => `<svg class="ic"><use href="#i-${name}"/></svg>`;
 
 // 봄노트가 발급한 입장 토큰 (URL #token=...)
 const liveToken = new URLSearchParams(window.location.hash.slice(1)).get('token') || '';
+// 봄노트에서 같은 창으로 들어왔으면, 수업을 마치고 나갈 때 봄노트 대시보드로 돌아감
+const BOMNOTE_HOME = (() => {
+  try { return document.referrer ? new URL('/dashboard', document.referrer).href : ''; } catch (_) { return ''; }
+})();
 // 지난 수업 다시 보기 (영상·채팅·그리기 없이 필기만)
 let reviewMode = false;
 
@@ -936,8 +940,14 @@ async function emitUserDevices() {
 ════════════════════════════════════════════ */
 leaveBtn.addEventListener('click', () => {
   if (canNote && socket && socket.connected) openLessonNote();
-  else leaveRoom();
+  else leaveAndReturn();
 });
+
+// [나가기]로 직접 나갈 때만 봄노트로 돌아감 (입장 실패 등은 이 화면에서 안내)
+function leaveAndReturn() {
+  leaveRoom();
+  if (BOMNOTE_HOME) window.location.href = BOMNOTE_HOME;
+}
 
 /* ── 수업 기록 (선생님이 [나가기]를 누르면 오늘 수업 내용을 적음) ── */
 const lessonNoteModal = document.getElementById('lesson-note-modal');
@@ -968,16 +978,16 @@ function openLessonNote() {
 function closeLessonNote() { lessonNoteModal.classList.add('hidden'); }
 
 lessonNoteSave.addEventListener('click', () => {
-  if (!lessonNoteLoaded && !lessonNoteText.value.trim()) { closeLessonNote(); leaveRoom(); return; }
+  if (!lessonNoteLoaded && !lessonNoteText.value.trim()) { closeLessonNote(); leaveAndReturn(); return; }
   lessonNoteSave.disabled = true;
   lessonNoteMsg.textContent = '저장 중...';
   socket.emit('lesson-note-save', { content: lessonNoteText.value }, (r) => {
-    if (r && r.ok) { closeLessonNote(); leaveRoom(); return; }
+    if (r && r.ok) { closeLessonNote(); leaveAndReturn(); return; }
     lessonNoteSave.disabled = false;
     lessonNoteMsg.textContent = '저장하지 못했어요. 다시 시도하거나 기록 없이 나가 주세요.';
   });
 });
-document.getElementById('lesson-note-skip').addEventListener('click', () => { closeLessonNote(); leaveRoom(); });
+document.getElementById('lesson-note-skip').addEventListener('click', () => { closeLessonNote(); leaveAndReturn(); });
 document.getElementById('lesson-note-close').addEventListener('click', closeLessonNote);
 
 function leaveRoom() {
