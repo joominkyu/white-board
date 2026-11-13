@@ -364,8 +364,9 @@ function setupSocketEvents() {
     if (!remoteLabel.textContent || remoteLabel.textContent === '상대방') {
       remoteLabel.textContent = username || '상대방';
     }
-    await createPeerConnection();
+    await createPeerConnection(true);
     await peerConnection.setRemoteDescription(offer);
+    attachLocalTracks(peerConnection);
     await flushPendingCandidates();
     const answer = await peerConnection.createAnswer();
     await peerConnection.setLocalDescription(answer);
@@ -633,7 +634,9 @@ async function flushPendingCandidates() {
   }
 }
 
-async function createPeerConnection() {
+// 연결을 받는 쪽(answering)은 여기서 카메라·마이크를 따로 추가하지 않음 — 따로 추가한 자리는 상대 제안과 짝이 맞지 않아
+// 내 영상이 전송되지 않았음 (예: 선생님이 먼저 들어와 있으면 학생 얼굴이 선생님 화면에 안 보임). 대신 attachLocalTracks로 넣음
+async function createPeerConnection(answering = false) {
   if (peerConnection) { peerConnection.close(); peerConnection = null; }
   pendingCandidates = [];
   const config = await getIceConfig();
@@ -641,7 +644,9 @@ async function createPeerConnection() {
   const pc = new RTCPeerConnection(config);
   peerConnection = pc;
 
-  if (localStream) {
+  if (answering) {
+    // 상대 제안을 받은 뒤 attachLocalTracks에서 처리
+  } else if (localStream) {
     localStream.getVideoTracks().forEach(t => peerConnection.addTransceiver(screenTrack || t, {
       direction: 'sendrecv', streams: [localStream],
       sendEncodings: [{ maxBitrate: screenTrack ? SCREEN_MAX_BITRATE : VIDEO_MAX_BITRATE }]
@@ -1979,6 +1984,24 @@ function switchMode(mode) {
 /* ════════════════════════════════════════════
    화면 공유 (보내는 영상을 카메라 ↔ 화면으로 교체)
 ════════════════════════════════════════════ */
+// 받은 제안의 영상·음성 자리에 내 카메라(화면 공유 중이면 화면)·마이크를 넣어 양방향으로
+function attachLocalTracks(pc) {
+  if (!localStream) return; // 카메라 없으면 받기만
+  const tracks = {
+    video: screenTrack || localStream.getVideoTracks()[0],
+    audio: gainedAudioTrack || localStream.getAudioTracks()[0]
+  };
+  for (const t of pc.getTransceivers()) {
+    const track = tracks[t.receiver.track.kind];
+    if (!track) continue;
+    t.sender.replaceTrack(track);
+    if (t.sender.setStreams) t.sender.setStreams(localStream);
+    t.direction = 'sendrecv';
+    if (track.kind === 'video') setSenderBitrate(t.sender, screenTrack ? SCREEN_MAX_BITRATE : VIDEO_MAX_BITRATE);
+    tracks[t.receiver.track.kind] = null; // 같은 종류 자리가 여러 개면 첫 자리에만
+  }
+}
+
 function videoSender() {
   return peerConnection && peerConnection.getSenders().find(s => s.track?.kind === 'video');
 }
