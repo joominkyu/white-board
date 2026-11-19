@@ -1899,7 +1899,12 @@ function startRecording() {
     'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'
   ].find(t => MediaRecorder.isTypeSupported(t)) || '';
 
-  const recorder = new MediaRecorder(recStream, mimeType ? { mimeType } : {});
+  // 화질을 화이트보드에 맞게 낮춤 (영상 0.8Mbps·소리 64kbps → 1시간 약 390MB). 미지정 시 브라우저 기본(약 2.5Mbps)이라 1시간에 1GB 안팎이 되어 봄노트 업로드 한도(500MB)를 넘었음
+  const recorder = new MediaRecorder(recStream, {
+    ...(mimeType ? { mimeType } : {}),
+    videoBitsPerSecond: 800_000,
+    audioBitsPerSecond: 64_000
+  });
   mediaRecorder = recorder;
   recordChunks = [];
 
