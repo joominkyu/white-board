@@ -1759,9 +1759,10 @@ async function renderPdfPage(pageNum) {
   const page = await pdfDoc.getPage(pdfCurrentPage);
   if (seq !== pdfRenderSeq) return; // 그 사이 다른 페이지/줌 렌더링이 시작됨
   const containerW = canvasContainer.clientWidth || 1200;
-  const containerH = canvasContainer.clientHeight || 800;
   const viewport0 = page.getViewport({ scale: 1 });
-  pdfBaseScale = Math.min(containerW / viewport0.width, containerH / viewport0.height, 2);
+  // 처음엔 화면 폭에 맞춤 (세로로 긴 페이지는 위아래로 스크롤) — 예전엔 페이지 전체가 보이게 맞춰서 너무 작았음.
+  // 세로 스크롤바 자리만큼 빼서 가로 스크롤이 생기지 않게, 최대 2배 (확대 시 캔버스가 너무 커지지 않게)
+  pdfBaseScale = Math.min((containerW - 20) / viewport0.width, 2);
   // 현재 줌 배율을 반영해 렌더링 → 확대해도 선명함
   const viewport = page.getViewport({ scale: pdfBaseScale * zoomLevel });
 
