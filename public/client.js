@@ -72,11 +72,17 @@ let currentShape   = 'rect'; // 'rect' | 'triangle' | 'circle'
 let currentPenMode = 'free'; // 'free' | 'line' | 'snap'
 let shapeStartX = 0, shapeStartY = 0;
 
-// PDF 상태
-let pdfDoc = null, pdfCurrentPage = 1, pdfTotalPages = 0, pdfVersion = null;
-// PDF를 내려받는 동안 상대가 넘긴 페이지 — 다 받은 뒤 이 페이지로 이동 (예전에는 무시하고 1쪽에 머물렀음)
-let pdfLoading = false, remotePdfPage = 1;
-let pendingPdfPage = null; // 연결이 끊긴 동안 내가 넘긴 페이지 — 다시 들어간 뒤 알림
+// PDF 상태 — 수업당 PDF 여러 개(최대 10개). 보고 있는 위치 = 파일 번호 * 10000 + 쪽 (빈 칠판은 0), 필기의 page도 같은 값
+const MAX_PDF_FILES = 10;
+const PAGE_KEY_BASE = 10000;
+const fileOfKey = (key) => Math.floor(key / PAGE_KEY_BASE);
+let pdfFiles = [];               // [{ id, name, version }]
+const pdfDocCache = new Map();   // 파일 번호 → { version, promise(pdf.js 문서) }
+const lastPageByFile = new Map(); // 파일마다 마지막으로 본 쪽 (파일을 다시 고르면 그 쪽으로)
+let pdfDoc = null, pdfFileId = null, pdfDocVersion = null, pdfCurrentPage = 1, pdfTotalPages = 0;
+let pdfLoading = false, showSeq = 0;
+let pendingPdfPage = null; // 연결이 끊긴 동안 내가 옮긴 위치 — 다시 들어간 뒤 알림
+let reviewHeaders = null;  // 다시 보기 모드에서 PDF를 받을 때 쓰는 인증 헤더
 // 선생님 화면 따라가기: 선생님이 확대·이동하면 학생 화면이 같은 부분을 보여줌
 let remoteView = null, viewSendTimer = null;
 let pdfRenderSeq = 0, pdfRenderTask = null;
@@ -143,6 +149,9 @@ const sizeDisplay  = document.getElementById('size-display');
 const pdfBtn       = document.getElementById('pdf-btn');
 const pdfInput     = document.getElementById('pdf-input');
 const pdfNav       = document.getElementById('pdf-nav');
+const pdfFilesGroup = document.getElementById('pdf-files');
+const pdfFileSelect = document.getElementById('pdf-file-select');
+const pdfDeleteBtn  = document.getElementById('pdf-delete-btn');
 const pdfPrev      = document.getElementById('pdf-prev');
 const pdfNext      = document.getElementById('pdf-next');
 const pdfPageInfo  = document.getElementById('pdf-page-info');
@@ -308,15 +317,16 @@ function setupSocketEvents() {
       remoteLabel.textContent = others[0].username;
     }
     updateNotifyButton();
-    // 끊긴 동안 내가 넘긴 페이지가 있으면 (같은 PDF일 때) 서버 페이지 대신 그 페이지로
-    const myPage = state.pdf && state.pdf.version === pdfVersion ? pendingPdfPage : null;
+    // 끊긴 동안 내가 옮긴 위치가 있으면 (그 파일이 아직 있을 때) 서버 위치 대신 그 위치로
+    const myPage = pendingPdfPage !== null && (pendingPdfPage === 0 || state.files.some(f => f.id === fileOfKey(pendingPdfPage)))
+      ? pendingPdfPage : null;
     pendingPdfPage = null;
-    if (myPage) state.pdfPage = myPage;
+    if (myPage !== null) state.pdfPage = myPage;
     // 서버 필기는 바로 반영되므로, PDF 그리기(화면이 가려져 있으면 멈춤)를 기다리지 않고 바로 필기를 다시 보내고 전송을 재개
     const applied = applyRoomState(state);
     resendStrokes(unsent);
     inRoom = true;
-    if (myPage) emitPdfPage(myPage);
+    if (myPage !== null) emitPdfPage(myPage);
     remoteView = state.view;
     sendView();
     await applied;
@@ -440,24 +450,26 @@ function setupSocketEvents() {
     if (page === currentPageKey()) redrawBoard();
   });
 
-  // PDF 수신
-  socket.on('pdf-updated', async ({ name, version }) => {
-    showSystemMsg(`상대방이 PDF를 공유했습니다: ${name}`);
-    strokes = strokes.filter(s => s.page === 0);
-    remotePdfPage = 1;
-    pdfLoading = true;
-    await loadPdfFromServer(version);
-    pdfLoading = false;
-    await renderPdfPage(remotePdfPage);
+  // PDF 수신 — 목록에 추가하고 그 파일 1쪽으로 이동 (기존 파일·필기는 그대로)
+  socket.on('pdf-added', async ({ file, pageKey }) => {
+    showSystemMsg(`상대방이 PDF를 공유했습니다: ${file.name}`);
+    if (!pdfFiles.some(f => f.id === file.id)) pdfFiles.push(file);
+    await showPosition(pageKey);
     applyRemoteView();
+  });
+  socket.on('pdf-deleted', async ({ id, pageKey }) => {
+    const file = pdfFiles.find(f => f.id === id);
+    const wasCurrent = pdfFileId === id;
+    removePdfFile(id);
+    if (file) showSystemMsg(`선생님이 PDF를 지웠습니다: ${file.name}`);
+    if (wasCurrent) { await showPosition(pageKey); applyRemoteView(); }
   });
   socket.on('view-change', (view) => {
     remoteView = view;
     applyRemoteView();
   });
   socket.on('pdf-page-change', (page) => {
-    remotePdfPage = page;
-    if (pdfDoc && !pdfLoading) renderPdfPage(page).then(applyRemoteView); // 페이지 크기가 다를 수 있어 다시 맞춤
+    showPosition(page).then(applyRemoteView); // 페이지 크기가 다를 수 있어 다시 맞춤
   });
 
   // 웹 공유
@@ -1023,7 +1035,12 @@ function leaveRoom() {
   remoteControls.classList.add('hidden');
   if (socket) { socket.disconnect(); socket = null; }
   pdfDoc = null;
-  pdfVersion = null;
+  pdfFileId = null;
+  pdfDocVersion = null;
+  pdfFiles = [];
+  pdfDocCache.clear();
+  lastPageByFile.clear();
+  updateFileSelect();
   strokes = [];
   myStroke = null;
   roomEl.classList.add('hidden');
@@ -1116,9 +1133,9 @@ function showZoomIndicator() {
 }
 
 /* ────────── 획 데이터 ↔ 캔버스 ────────── */
-// 빈 보드는 0, PDF는 페이지 번호
+// 빈 보드는 0, PDF는 파일 번호 * 10000 + 쪽
 function currentPageKey() {
-  return pdfDoc ? pdfCurrentPage : 0;
+  return pdfDoc ? pdfFileId * PAGE_KEY_BASE + pdfCurrentPage : 0;
 }
 
 const toNorm = (x, y) => [x / drawCanvas.width, y / drawCanvas.height];
@@ -1598,6 +1615,7 @@ function updateHostUI() {
   clearAllBtn.title = isHost ? '전체 지우기' : '방장만 지울 수 있습니다';
   if (isHost) remoteControls.classList.remove('hidden');
   else        remoteControls.classList.add('hidden');
+  updateFileSelect(); // 파일 삭제 버튼은 선생님만
 }
 
 clearAllBtn.addEventListener('click', () => {
@@ -1635,23 +1653,57 @@ function clearPdfCanvas() {
 /* ════════════════════════════════════════════
    서버에서 받은 방 상태 적용 (입장/재접속 시)
 ════════════════════════════════════════════ */
-async function applyRoomState({ pdf, pdfPage, strokes: serverStrokes }) {
+async function applyRoomState({ files, pdfPage, strokes: serverStrokes }) {
   strokes = serverStrokes;
   myStroke = null;
   isDrawing = false;
+  pdfFiles = files || [];
+  // 없어졌거나 바뀐 파일은 다시 받도록 버림
+  for (const [id, cached] of pdfDocCache) {
+    if (!pdfFiles.some(f => f.id === id && f.version === cached.version)) pdfDocCache.delete(id);
+  }
+  await showPosition(pdfPage); // 서버에 그 파일이 없으면 (방이 만료된 경우 등) 빈 보드로
+}
 
-  if (pdf) {
-    remotePdfPage = pdfPage;
-    if (pdf.version !== pdfVersion) {
-      pdfLoading = true;
-      await loadPdfFromServer(pdf.version);
-      pdfLoading = false;
+/* ────────── PDF 파일 목록 ────────── */
+// 보고 있는 위치로 이동 — key: 파일 번호 * 10000 + 쪽, 빈 칠판은 0 (없는 파일이면 빈 칠판)
+async function showPosition(key) {
+  const seq = ++showSeq;
+  pdfLoading = true; // 이동이 끝날 때까지 선생님 화면 따라가기는 잠시 멈춤
+  try {
+    const file = key ? pdfFiles.find(f => f.id === fileOfKey(key)) : null;
+    if (file && (pdfFileId !== file.id || pdfDocVersion !== file.version || !pdfDoc)) {
+      const doc = await getPdfDoc(file);
+      if (seq !== showSeq) return; // 그 사이 다른 곳으로 이동함
+      if (doc) {
+        pdfDoc = doc;
+        pdfFileId = file.id;
+        pdfDocVersion = file.version;
+        pdfTotalPages = doc.numPages;
+        pdfNav.classList.remove('hidden');
+        buildPagesList(pdfTotalPages);
+      } else {
+        showSystemMsg('PDF를 불러오지 못했습니다.');
+      }
     }
-    await renderPdfPage(remotePdfPage);
-  } else if (pdfDoc) {
-    // 서버에 PDF가 없으면 (방이 만료된 경우) 빈 보드로
+    if (file && pdfDoc && pdfFileId === file.id) {
+      updateFileSelect();
+      await renderPdfPage(key % PAGE_KEY_BASE);
+    } else {
+      showBlankBoard();
+    }
+  } finally {
+    if (seq === showSeq) pdfLoading = false;
+  }
+}
+
+function showBlankBoard() {
+  if (pdfDoc) {
     pdfDoc = null;
-    pdfVersion = null;
+    pdfFileId = null;
+    pdfDocVersion = null;
+    ++pdfRenderSeq; // 그리던 PDF 쪽은 버림
+    if (pdfRenderTask) pdfRenderTask.cancel();
     pdfNav.classList.add('hidden');
     pagesPanel.classList.add('hidden');
     pagesList.innerHTML = '';
@@ -1660,17 +1712,98 @@ async function applyRoomState({ pdf, pdfPage, strokes: serverStrokes }) {
   } else {
     redrawBoard();
   }
+  updateFileSelect();
 }
+
+// 파일을 한 번만 받아서 pdf.js 문서로 (받는 중이면 같은 요청을 기다림)
+function getPdfDoc(file) {
+  const cached = pdfDocCache.get(file.id);
+  if (cached && cached.version === file.version) return cached.promise;
+  const promise = fetchPdfBytes(file.id)
+    .then(bytes => (bytes ? pdfjsLib.getDocument({ data: bytes }).promise : null))
+    .catch(() => null);
+  pdfDocCache.set(file.id, { version: file.version, promise });
+  promise.then(doc => { if (!doc && pdfDocCache.get(file.id)?.promise === promise) pdfDocCache.delete(file.id); });
+  return promise;
+}
+
+async function fetchPdfBytes(fileId) {
+  if (reviewMode) {
+    const res = await fetch(`/review/pdf/${fileId}`, { headers: reviewHeaders });
+    return res.ok ? new Uint8Array(await res.arrayBuffer()) : null;
+  }
+  // 약한 와이파이에서 한 번 실패해도 2초 간격으로 3번까지 다시 시도
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`/rooms/${encodeURIComponent(myRoomId)}/pdf/${fileId}`, { headers: { 'X-Socket-Id': socket.id } });
+      if (res.ok) return new Uint8Array(await res.arrayBuffer());
+      if (res.status === 404) return null; // 그 사이 지워진 파일
+    } catch (_) {}
+    if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+  }
+  return null;
+}
+
+function removePdfFile(id) {
+  pdfFiles = pdfFiles.filter(f => f.id !== id);
+  pdfDocCache.delete(id);
+  lastPageByFile.delete(id);
+  strokes = strokes.filter(s => s.page === 0 || fileOfKey(s.page) !== id);
+  updateFileSelect();
+}
+
+// 툴바의 파일 선택칸 — 빈 칠판 + 올린 PDF들, 지우기 버튼은 선생님만
+function updateFileSelect() {
+  pdfFilesGroup.classList.toggle('hidden', pdfFiles.length === 0);
+  pdfFileSelect.innerHTML = '';
+  const options = [{ value: -1, label: '빈 칠판' }, ...pdfFiles.map(f => ({ value: f.id, label: f.name }))];
+  for (const o of options) {
+    const opt = document.createElement('option');
+    opt.value = o.value;
+    opt.textContent = o.label;
+    pdfFileSelect.appendChild(opt);
+  }
+  pdfFileSelect.value = String(pdfDoc ? pdfFileId : -1);
+  pdfDeleteBtn.classList.toggle('hidden', !isHost || !pdfDoc || reviewMode);
+}
+
+pdfFileSelect.addEventListener('change', () => {
+  const id = Number(pdfFileSelect.value);
+  const key = id < 0 ? 0 : id * PAGE_KEY_BASE + (lastPageByFile.get(id) || 1);
+  emitPdfPage(key);
+  showPosition(key);
+});
+
+pdfDeleteBtn.addEventListener('click', () => {
+  const file = pdfFiles.find(f => f.id === pdfFileId);
+  if (!isHost || !pdfDoc || !file) return;
+  if (!socket || !inRoom) { showSystemMsg('서버에 다시 연결된 뒤에 지워 주세요.'); return; }
+  if (!confirm(`"${file.name}" 파일과 그 위의 필기를 지울까요? 되돌릴 수 없어요.`)) return;
+  socket.emit('pdf-delete', file.id);
+  removePdfFile(file.id);
+  showPosition(0);
+});
 
 /* ════════════════════════════════════════════
    PDF
 ════════════════════════════════════════════ */
 pdfBtn.addEventListener('click', () => pdfInput.click());
 
-pdfInput.addEventListener('change', async (e) => {
+pdfInput.addEventListener('change', (e) => {
   const file = e.target.files[0];
   pdfInput.value = '';
-  if (!file || !socket) return;
+  if (file) uploadPdf(file);
+});
+
+const isPdfFile = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+
+// PDF를 목록에 추가 ([PDF] 버튼, 끌어다 놓기 공용) — 서버에 올리면 서버가 상대방에게 알림
+async function uploadPdf(file) {
+  if (!socket || reviewMode) return;
+  if (pdfFiles.length >= MAX_PDF_FILES) {
+    showSystemMsg(`PDF는 수업당 ${MAX_PDF_FILES}개까지 올릴 수 있어요. 안 쓰는 파일을 지운 뒤 올려 주세요.`);
+    return;
+  }
   showSystemMsg(`PDF 업로드 중: ${file.name}`);
   try {
     // 서버에 올리면 서버가 상대방에게 알림 (늦게 들어온 사람도 서버에서 받음)
@@ -1684,43 +1817,48 @@ pdfInput.addEventListener('change', async (e) => {
       body: file
     });
     if (res.status === 413) { showSystemMsg('PDF가 너무 큽니다 (최대 50MB).'); return; }
+    if (res.status === 409) { showSystemMsg(`PDF는 수업당 ${MAX_PDF_FILES}개까지 올릴 수 있어요. 안 쓰는 파일을 지운 뒤 올려 주세요.`); return; }
     if (!res.ok) throw new Error(`status ${res.status}`);
-    const { version } = await res.json();
-    strokes = strokes.filter(s => s.page === 0);
-    await loadPdfData(new Uint8Array(await file.arrayBuffer()), version);
-    await renderPdfPage(1);
+    const { file: meta, pageKey } = await res.json();
+    if (!pdfFiles.some(f => f.id === meta.id)) pdfFiles.push(meta);
+    // 내가 올린 파일은 다시 받지 않고 가지고 있는 걸로 엶
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    pdfDocCache.set(meta.id, { version: meta.version, promise: pdfjsLib.getDocument({ data: bytes }).promise });
+    await showPosition(pageKey);
     showSystemMsg(`PDF 공유됨: ${file.name}`);
   } catch (err) {
     console.error('PDF 업로드 실패:', err);
     showSystemMsg('PDF 업로드에 실패했습니다.');
   }
+}
+
+// 파일을 화면에 끌어다 놓으면 PDF를 올림 — 브라우저가 그 파일을 열어 수업에서 나가지는 일도 막음
+const isFileDrag = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+document.addEventListener('dragover', (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  const canDrop = inRoom && !reviewMode;
+  e.dataTransfer.dropEffect = canDrop ? 'copy' : 'none';
+  canvasContainer.classList.toggle('drop-target', canDrop);
+});
+document.addEventListener('dragleave', (e) => {
+  if (!e.relatedTarget) canvasContainer.classList.remove('drop-target'); // 창 밖으로 나감
+});
+document.addEventListener('drop', (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  canvasContainer.classList.remove('drop-target');
+  if (!inRoom || reviewMode) return;
+  const pdf = Array.from(e.dataTransfer.files).find(isPdfFile); // 여러 개를 놓으면 첫 번째 PDF만
+  if (!pdf) { showSystemMsg('PDF 파일만 올릴 수 있어요.'); return; }
+  uploadPdf(pdf);
 });
 
-async function loadPdfFromServer(version) {
-  // 약한 와이파이에서 한 번 실패해도 2초 간격으로 3번까지 다시 시도
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const res = await fetch(`/rooms/${encodeURIComponent(myRoomId)}/pdf?v=${version}`, { headers: { 'X-Socket-Id': socket.id } });
-      if (res.ok) { await loadPdfData(new Uint8Array(await res.arrayBuffer()), version); return; }
-    } catch (_) {}
-    if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
-  }
-  showSystemMsg('PDF를 불러오지 못했습니다.');
-}
-
-// 내가 넘긴 페이지를 상대에게 알림 — 연결이 끊긴 동안이면 기억했다가 다시 들어간 뒤 알림
-function emitPdfPage(page) {
-  if (socket && inRoom) socket.emit('pdf-page-change', page);
-  else pendingPdfPage = page;
-}
-
-async function loadPdfData(bytes, version) {
-  pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
-  pdfVersion = version;
-  pdfTotalPages = pdfDoc.numPages;
-  pdfCurrentPage = 1;
-  pdfNav.classList.remove('hidden');
-  buildPagesList(pdfTotalPages);
+// 내가 옮긴 위치(파일·쪽)를 상대에게 알림 — 연결이 끊긴 동안이면 기억했다가 다시 들어간 뒤 알림
+function emitPdfPage(key) {
+  if (reviewMode) return;
+  if (socket && inRoom) socket.emit('pdf-page-change', key);
+  else pendingPdfPage = key;
 }
 
 function buildPagesList(total) {
@@ -1731,9 +1869,8 @@ function buildPagesList(total) {
     btn.textContent = i;
     btn.dataset.page = i;
     btn.addEventListener('click', () => {
-      const page = parseInt(btn.dataset.page, 10);
-      renderPdfPage(page);
-      emitPdfPage(page);
+      renderPdfPage(parseInt(btn.dataset.page, 10));
+      emitPdfPage(currentPageKey());
     });
     pagesList.appendChild(btn);
   }
@@ -1753,6 +1890,7 @@ async function renderPdfPage(pageNum) {
   clearTimeout(zoomRenderTimer);
   const seq = ++pdfRenderSeq;
   pdfCurrentPage = Math.max(1, Math.min(pageNum, pdfTotalPages));
+  lastPageByFile.set(pdfFileId, pdfCurrentPage);
   pdfPageInfo.textContent = `${pdfCurrentPage} / ${pdfTotalPages}`;
   updatePagesListActive(pdfCurrentPage);
 
@@ -1789,13 +1927,13 @@ async function renderPdfPage(pageNum) {
 pdfPrev.addEventListener('click', () => {
   if (!pdfDoc || pdfCurrentPage <= 1) return;
   renderPdfPage(pdfCurrentPage - 1);
-  emitPdfPage(pdfCurrentPage);
+  emitPdfPage(currentPageKey());
 });
 
 pdfNext.addEventListener('click', () => {
   if (!pdfDoc || pdfCurrentPage >= pdfTotalPages) return;
   renderPdfPage(pdfCurrentPage + 1);
-  emitPdfPage(pdfCurrentPage);
+  emitPdfPage(currentPageKey());
 });
 
 /* ════════════════════════════════════════════
@@ -2099,7 +2237,7 @@ canvasContainer.addEventListener('wheel', (e) => {
 
 // 키보드 단축키
 window.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
   if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); return; }
   if (e.key === 'ArrowLeft') pdfPrev.click();
   if (e.key === 'ArrowRight') pdfNext.click();
@@ -2114,6 +2252,7 @@ const exportPdfBtn = document.getElementById('export-pdf-btn');
 
 async function initReview() {
   const headers = { Authorization: `Bearer ${liveToken}` };
+  reviewHeaders = headers;
   try {
     const res = await fetch('/review/state', { headers });
     if (!res.ok) throw new Error(`status ${res.status}`);
@@ -2125,15 +2264,9 @@ async function initReview() {
     roomTitle.textContent = '지난 수업 다시 보기';
     initCanvasSize();
     strokes = state.strokes;
-
-    if (state.pdf) {
-      const pdfRes = await fetch('/review/pdf', { headers });
-      if (!pdfRes.ok) throw new Error(`PDF status ${pdfRes.status}`);
-      await loadPdfData(new Uint8Array(await pdfRes.arrayBuffer()), 'review');
-      await renderPdfPage(1);
-    } else {
-      redrawBoard();
-    }
+    pdfFiles = state.files.map(f => ({ ...f, version: 'review' }));
+    // 첫 번째 PDF 1쪽부터 (없으면 빈 칠판), 다른 파일은 툴바의 파일 선택칸으로
+    await showPosition(pdfFiles.length ? pdfFiles[0].id * PAGE_KEY_BASE + 1 : 0);
   } catch (err) {
     console.error('다시 보기 실패:', err);
     lobbyInfo.textContent = '';
@@ -2188,14 +2321,17 @@ async function exportPdf() {
 
     // PDF 없이 빈 보드에 쓴 필기가 있으면 첫 장
     if (strokes.some(s => s.page === 0)) addPage(composePage(null, 1600, 900, 0));
-    if (pdfDoc) {
-      for (let i = 1; i <= pdfTotalPages; i++) {
-        const page = await pdfDoc.getPage(i);
+    // 올린 PDF 순서대로 모든 쪽
+    for (const file of pdfFiles) {
+      const doc = await getPdfDoc(file);
+      if (!doc) continue;
+      for (let i = 1; i <= doc.numPages; i++) {
+        const page = await doc.getPage(i);
         const viewport = page.getViewport({ scale: 1.5 });
         const bg = document.createElement('canvas');
         bg.width = Math.floor(viewport.width); bg.height = Math.floor(viewport.height);
         await page.render({ canvasContext: bg.getContext('2d'), viewport }).promise;
-        addPage(composePage(bg, bg.width, bg.height, i));
+        addPage(composePage(bg, bg.width, bg.height, file.id * PAGE_KEY_BASE + i));
       }
     }
 

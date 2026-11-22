@@ -12,7 +12,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black" />
   <meta name="apple-mobile-web-app-title" content="봄노트 수업" />
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
-  <link rel="stylesheet" href="style.css?v=14" />
+  <link rel="stylesheet" href="style.css?v=15" />
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true">
@@ -171,6 +171,10 @@
               <button id="pdf-btn" class="action-btn" title="PDF 업로드"><svg class="ic"><use href="#i-file"/></svg> PDF</button>
               <input id="pdf-input" type="file" accept=".pdf" class="hidden" />
             </div>
+            <div class="tool-group pdf-files hidden" id="pdf-files">
+              <select id="pdf-file-select" class="pdf-file-select" title="파일 고르기"></select>
+              <button id="pdf-delete-btn" class="nav-btn hidden" title="이 PDF 지우기"><svg class="ic"><use href="#i-trash"/></svg></button>
+            </div>
             <div class="tool-group pdf-nav hidden" id="pdf-nav">
               <button id="pdf-prev" class="nav-btn">◀</button>
               <span id="pdf-page-info">1 / 1</span>
@@ -318,6 +322,6 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-  <script src="client.js?v=26"></script>
+  <script src="client.js?v=27"></script>
 </body>
 </html>

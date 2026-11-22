@@ -815,6 +815,20 @@ body {
   flex-shrink: 0;
 }
 
+/* PDF 파일 선택칸 */
+.pdf-file-select {
+  max-width: 170px;
+  background: #1e2332;
+  border: 1px solid #3a4055;
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: #c5cde0;
+}
+
+/* 파일을 끌어다 놓을 때 */
+.canvas-container.drop-target { outline: 3px dashed #22c55e; outline-offset: -6px; }
+
 .page-num-btn:hover {
   background: #252b3b;
   color: #c5cde0;
@@ -1084,7 +1098,7 @@ body {
 .review-mode #rec-indicator,
 .review-mode #leave-btn,
 .review-mode .mode-bar,
-.review-mode .toolbar .tool-group:not(.pdf-nav) { display: none !important; }
+.review-mode .toolbar .tool-group:not(.pdf-nav):not(.pdf-files) { display: none !important; }
 .review-mode #draw-canvas { cursor: default !important; }
 
 /* ── 화면 공유 보기 ── */
