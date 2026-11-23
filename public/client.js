@@ -1087,7 +1087,7 @@ function applyZoom() {
   sendView();
 }
 
-// 화면 가운데가 페이지의 어디인지 (0~1) — 화면 크기가 달라도 같은 부분을 가리킴
+// 화면 가운데가 페이지의 어디인지 (0~1) + 화면에 보이는 영역의 크기 (페이지 폭·높이 대비) — 화면 크기가 달라도 같은 부분을 가리킴
 function currentView() {
   const box = canvasContainer.getBoundingClientRect();
   const page = drawCanvas.getBoundingClientRect(); // 확대(CSS 배율) 반영된 실제 크기
@@ -1095,7 +1095,9 @@ function currentView() {
   return {
     zoom: zoomLevel,
     cx: clamp((box.left + box.width / 2 - page.left) / page.width),
-    cy: clamp((box.top + box.height / 2 - page.top) / page.height)
+    cy: clamp((box.top + box.height / 2 - page.top) / page.height),
+    w: box.width / page.width,
+    h: box.height / page.height
   };
 }
 
@@ -1108,11 +1110,25 @@ function sendView() {
   }, 100);
 }
 
-// 학생: 선생님과 같은 배율로 확대하고, 선생님 화면 가운데였던 지점을 내 화면 가운데로
+// 학생: 선생님 화면에 보이는 영역이 내 화면에 꽉 차게(잘리지 않게) 확대하고, 선생님 화면 가운데였던 지점을 내 화면 가운데로
+// 예전에는 배율 숫자만 맞춰서, 화면 모양(컴퓨터 가로 ↔ 패드 세로)이 다르면 보이는 범위가 달랐음
+function remoteZoom(view) {
+  if (!view.w || !view.h) return view.zoom; // 예전 방식으로 보낸 값
+  const box = canvasContainer.getBoundingClientRect();
+  const page = drawCanvas.getBoundingClientRect();
+  if (!box.width || !page.width) return view.zoom;
+  // 배율 1일 때 내 화면에서의 페이지 크기
+  const baseW = page.width / zoomLevel, baseH = page.height / zoomLevel;
+  const fit = Math.min(box.width / (baseW * view.w), box.height / (baseH * view.h));
+  return Math.min(4.0, Math.max(0.25, Math.round(fit * 100) / 100));
+}
+
 function applyRemoteView() {
   if (isHost || !remoteView || pdfLoading) return;
-  if (zoomLevel !== remoteView.zoom) {
-    zoomLevel = remoteView.zoom;
+  const target = remoteZoom(remoteView);
+  // 0.01 차이는 무시 (다시 그린 캔버스 크기가 1px 달라서 계속 다시 그리는 일 방지)
+  if (Math.abs(zoomLevel - target) >= 0.02) {
+    zoomLevel = target;
     applyZoom();
     if (currentTool === 'eraser') setEraserCursor(strokeSize);
   }
@@ -1388,7 +1404,9 @@ window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
     if (roomEl.classList.contains('hidden')) return;
-    if (pdfDoc) renderPdfPage(pdfCurrentPage); else initCanvasSize();
+    // 보이는 영역이 바뀌므로 선생님은 다시 알리고, 학생은 선생님 영역에 다시 맞춤
+    const fitted = pdfDoc ? renderPdfPage(pdfCurrentPage) : Promise.resolve(initCanvasSize());
+    fitted.then(() => { sendView(); applyRemoteView(); });
   }, 200);
 });
 

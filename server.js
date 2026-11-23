@@ -626,13 +626,15 @@ io.on('connection', (socket) => {
 
   // ── PDF 페이지 동기화 ──
   // 선생님이 보고 있는 부분(확대 배율 + 화면 가운데의 페이지 내 위치 0~1) → 학생 화면이 따라감
-  socket.on('view-change', ({ zoom, cx, cy } = {}) => {
+  // w, h: 선생님 화면에 보이는 영역 크기 (페이지 폭·높이 대비) — 학생 화면은 이 영역이 꽉 차게 확대
+  socket.on('view-change', ({ zoom, cx, cy, w, h } = {}) => {
     const room = rooms[socket.data.roomId];
     if (!room || room.host !== socket.id || !isNum(zoom) || !isNum(cx) || !isNum(cy)) return;
     room.view = {
       zoom: Math.min(4, Math.max(0.25, zoom)),
       cx: Math.min(1, Math.max(0, cx)),
-      cy: Math.min(1, Math.max(0, cy))
+      cy: Math.min(1, Math.max(0, cy)),
+      ...(isNum(w) && isNum(h) && w > 0 && h > 0 ? { w: Math.min(10, w), h: Math.min(10, h) } : {})
     };
     socket.to(socket.data.roomId).emit('view-change', room.view);
   });
