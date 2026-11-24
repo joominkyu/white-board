@@ -887,6 +887,15 @@ body {
   pointer-events: none;
 }
 
+/* 그리는 중인 형광펜 — 다 그리면 필기 캔버스로 옮겨짐. 아래 글씨와 곱하기로 섞어 완성된 모습과 같게 */
+#live-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
 /* ── 도형 선택 팝업 ── */
 .shape-wrap {
   position: relative;

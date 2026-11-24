@@ -190,7 +190,7 @@ function cleanStroke(s, owner) {
     owner,
     page: s.page,
     kind: s.kind,
-    tool: s.tool === 'eraser' ? 'eraser' : 'pen',
+    tool: ['eraser', 'highlighter'].includes(s.tool) ? s.tool : 'pen',
     shape: ['rect', 'triangle', 'circle'].includes(s.shape) ? s.shape : 'rect',
     filled: !!s.filled,
     color: s.color,
@@ -509,6 +509,13 @@ io.on('connection', (socket) => {
     stroke.points.push(...clean);
     markDirty(room);
     socket.to(socket.data.roomId).emit('stroke-points', { id, points: clean });
+  });
+
+  // 형광펜 획을 다 그렸다는 알림 — 받는 쪽이 그리는 중 레이어에서 필기 캔버스로 옮김
+  socket.on('stroke-end', (id) => {
+    const room = rooms[socket.data.roomId];
+    if (!room || !isStr(id, 64)) return;
+    socket.to(socket.data.roomId).emit('stroke-end', id);
   });
 
   socket.on('stroke-undo', (id) => {

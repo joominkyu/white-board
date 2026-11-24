@@ -66,6 +66,10 @@ let strokeSize = 1;
 // 펜·도형과 지우개는 굵기를 따로 기억
 let drawSize = 1;
 let eraserSize = 20;
+// 형광펜은 색·굵기를 펜과 따로 기억
+let penColor = '#000000';
+let hlColor = '#eab308';
+let hlSize = 20;
 let penButtonPrevTool = null; // S펜 버튼으로 잠깐 지우개를 쓰기 전 도구
 let lastX = 0, lastY = 0;
 let currentShape   = 'rect'; // 'rect' | 'triangle' | 'circle'
@@ -102,6 +106,9 @@ let audioCtx = null, recTimerInterval = null, recStartTime = 0;
 // { id, owner, page, kind: 'path'|'line'|'shape', tool, shape, filled, color, size, points: [[x,y], ...] }
 let strokes = [];
 let myStroke = null; // 그리는 중인 내 자유선 획
+// 그리는 중인 형광펜 획(내 것·상대 것) id — 조각마다 그리면 이음매가 진하게 겹치므로 live 캔버스에 획 전체를 다시 그림
+const liveIds = new Set();
+let liveFrame = 0;
 
 // ── DOM ──
 const lobby        = document.getElementById('lobby');
@@ -138,10 +145,13 @@ const canvasContainer = document.getElementById('canvas-container');
 const pdfCanvas     = document.getElementById('pdf-canvas');
 const drawCanvas    = document.getElementById('draw-canvas');
 const previewCanvas = document.getElementById('preview-canvas');
+const liveCanvas    = document.getElementById('live-canvas');
 const pdfCtx        = pdfCanvas.getContext('2d');
 const drawCtx       = drawCanvas.getContext('2d');
 const previewCtx    = previewCanvas.getContext('2d');
+const liveCtx       = liveCanvas.getContext('2d');
 const toolPen      = document.getElementById('tool-pen');
+const toolHighlighter = document.getElementById('tool-highlighter');
 const toolEraser   = document.getElementById('tool-eraser');
 const colorSwatches = document.querySelectorAll('.color-swatch');
 const sizeSlider   = document.getElementById('size-slider');
@@ -426,7 +436,10 @@ function setupSocketEvents() {
   // 화이트보드 수신 — 상대 획은 구간마다 독립된 path로 그려 내 획과 섞이지 않음
   socket.on('stroke-start', (stroke) => {
     strokes.push(stroke);
-    if (stroke.kind === 'path') {
+    if (isLiveStroke(stroke)) {
+      liveIds.add(stroke.id);
+      scheduleLive();
+    } else if (stroke.kind === 'path') {
       if (stroke.page === currentPageKey()) drawSegment(stroke, stroke.points[0], stroke.points[0]);
     } else if (stroke.page === currentPageKey()) {
       drawStroke(drawCtx, stroke);
@@ -435,11 +448,22 @@ function setupSocketEvents() {
   socket.on('stroke-points', ({ id, points }) => {
     const stroke = strokes.findLast(s => s.id === id);
     if (!stroke) return;
+    // 재접속 직후처럼 그리던 형광펜 획을 이미 필기 캔버스에 그려 둔 경우에도 live로 옮김
+    if (isLiveStroke(stroke) && !liveIds.has(id)) { liveIds.add(id); redrawBoard(); }
+    if (liveIds.has(id)) {
+      stroke.points.push(...points);
+      scheduleLive();
+      return;
+    }
     for (const p of points) {
       const prev = stroke.points[stroke.points.length - 1];
       stroke.points.push(p);
       if (stroke.page === currentPageKey()) drawSegment(stroke, prev, p);
     }
+  });
+  socket.on('stroke-end', (id) => {
+    const stroke = strokes.findLast(s => s.id === id);
+    if (stroke) finishLive(stroke);
   });
   socket.on('stroke-removed', (id) => {
     strokes = strokes.filter(s => s.id !== id);
@@ -1043,6 +1067,7 @@ function leaveRoom() {
   updateFileSelect();
   strokes = [];
   myStroke = null;
+  liveIds.clear();
   roomEl.classList.add('hidden');
   lobby.classList.remove('hidden');
   clearDrawCanvas();
@@ -1062,7 +1087,7 @@ function leaveRoom() {
 function initCanvasSize() {
   const fit = Math.min((canvasContainer.clientWidth || 1600) / 1600, (canvasContainer.clientHeight || 900) / 900, 2);
   const w = Math.floor(1600 * fit), h = Math.floor(900 * fit);
-  [pdfCanvas, drawCanvas, previewCanvas].forEach(c => { c.width = w; c.height = h; });
+  [pdfCanvas, drawCanvas, previewCanvas, liveCanvas].forEach(c => { c.width = w; c.height = h; });
   canvasZoom = 1;
   canvasInner.style.width  = w + 'px';
   canvasInner.style.height = h + 'px';
@@ -1207,7 +1232,32 @@ function drawSegment(s, from, to) {
 function redrawBoard() {
   clearDrawCanvas();
   const page = currentPageKey();
-  strokes.forEach(s => { if (s.page === page) drawStroke(drawCtx, s); });
+  strokes.forEach(s => { if (s.page === page && !liveIds.has(s.id)) drawStroke(drawCtx, s); });
+  renderLive();
+}
+
+/* ────────── 형광펜: 그리는 중인 획 ────────── */
+const isLiveStroke = (s) => s.kind === 'path' && s.tool === 'highlighter';
+
+// 그리는 중인 형광펜 획 전체를 live 캔버스에 한 번에 다시 그림 (반투명 조각이 겹쳐 진해지지 않게)
+function renderLive() {
+  liveCtx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
+  if (!liveIds.size) return;
+  const page = currentPageKey();
+  strokes.forEach(s => { if (liveIds.has(s.id) && s.page === page) drawStroke(liveCtx, s); });
+}
+
+// 점이 들어올 때마다가 아니라 화면 한 프레임에 한 번만
+function scheduleLive() {
+  if (liveFrame) return;
+  liveFrame = requestAnimationFrame(() => { liveFrame = 0; renderLive(); });
+}
+
+// 다 그린 형광펜 획을 필기 캔버스로 옮김
+function finishLive(stroke) {
+  if (!liveIds.delete(stroke.id)) return;
+  if (stroke.page === currentPageKey()) drawStroke(drawCtx, stroke);
+  renderLive();
 }
 
 // 직선/도형 획을 확정해서 저장·전송
@@ -1263,7 +1313,7 @@ let lastPenAt = 0;
 function strokePoint(e) {
   const { x, y } = getPos(e);
   const p = toNorm(x, y);
-  if (e.pointerType === 'pen' && currentTool !== 'eraser') p.push(Math.round(e.pressure * 100) / 100); // 지우개는 필압 없이 고정 굵기
+  if (e.pointerType === 'pen' && currentTool === 'pen') p.push(Math.round(e.pressure * 100) / 100); // 지우개·형광펜은 필압 없이 고정 굵기
   return p;
 }
 
@@ -1299,7 +1349,8 @@ drawCanvas.addEventListener('pointerdown', e => {
     tool: currentTool, color: strokeColor, size: normSize(), points: [p]
   };
   strokes.push(myStroke);
-  drawSegment(myStroke, p, p);
+  if (isLiveStroke(myStroke)) { liveIds.add(myStroke.id); scheduleLive(); }
+  else drawSegment(myStroke, p, p);
   emitStroke('stroke-start', myStroke, myStroke.id);
 });
 
@@ -1324,9 +1375,10 @@ drawCanvas.addEventListener('pointermove', e => {
     const p = strokePoint(ev);
     const prev = myStroke.points[myStroke.points.length - 1];
     myStroke.points.push(p);
-    drawSegment(myStroke, prev, p);
+    if (!liveIds.has(myStroke.id)) drawSegment(myStroke, prev, p);
     added.push(p);
   }
+  if (liveIds.has(myStroke.id)) scheduleLive();
   emitStroke('stroke-points', { id: myStroke.id, points: added }, myStroke.id);
 });
 
@@ -1348,8 +1400,12 @@ function finishDrawing(e, commit) {
     }
     return;
   }
+  if (myStroke && liveIds.has(myStroke.id)) {
+    finishLive(myStroke);
+    if (socket && inRoom) socket.emit('stroke-end', myStroke.id);
+  }
   myStroke = null;
-  if (penButtonPrevTool) { currentTool = penButtonPrevTool; strokeSize = drawSize; penButtonPrevTool = null; }
+  if (penButtonPrevTool) { currentTool = penButtonPrevTool; penButtonPrevTool = null; strokeSize = currentTool === 'highlighter' ? hlSize : drawSize; }
 }
 
 drawCanvas.addEventListener('pointerup', e => { if (e.pointerId === activePointerId) finishDrawing(e, true); });
@@ -1427,6 +1483,10 @@ function setupCtx(ctx, tool, color, size) {
   if (tool === 'eraser') {
     ctx.globalCompositeOperation = 'destination-out';
     ctx.strokeStyle = 'rgba(0,0,0,1)';
+  } else if (tool === 'highlighter') {
+    // 반투명 + 곱하기 합성 → 검은 글씨 위에 칠해도 글씨가 흐려지지 않음
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.strokeStyle = color + '66'; // #rrggbb + 투명도 40%
   } else {
     ctx.globalCompositeOperation = 'source-over';
     ctx.strokeStyle = color;
@@ -1445,6 +1505,7 @@ toolPen.addEventListener('click', (e) => {
   applyToolSize();
   toolPen.classList.add('active');
   toolEraser.classList.remove('active');
+  toolHighlighter.classList.remove('active');
   toolShapeBtn.classList.remove('active');
   shapePopup.classList.add('hidden');
   setPencilCursor();
@@ -1460,6 +1521,7 @@ penOpts.forEach(btn => {
     penPopup.classList.add('hidden');
     toolPen.classList.add('active');
     toolEraser.classList.remove('active');
+    toolHighlighter.classList.remove('active');
     toolShapeBtn.classList.remove('active');
     toolShapeBtn.innerHTML = ic('shapes');
     toolPen.innerHTML = PEN_ICONS[currentPenMode];
@@ -1506,6 +1568,7 @@ shapeOpts.forEach(btn => {
     shapePopup.classList.add('hidden');
     toolPen.classList.remove('active');
     toolEraser.classList.remove('active');
+    toolHighlighter.classList.remove('active');
     toolShapeBtn.classList.add('active');
     toolShapeBtn.textContent = SHAPE_ICONS[currentShape][shapeFilled ? 'filled' : 'outline'];
     shapeOpts.forEach(o => o.classList.toggle('active',
@@ -1599,29 +1662,49 @@ toolEraser.addEventListener('click', () => {
   applyToolSize();
   toolEraser.classList.add('active');
   toolPen.classList.remove('active');
+  toolHighlighter.classList.remove('active');
   toolShapeBtn.classList.remove('active');
   penPopup.classList.add('hidden');
   shapePopup.classList.add('hidden');
   setEraserCursor(strokeSize);
 });
 
+toolHighlighter.addEventListener('click', () => {
+  currentTool = 'highlighter';
+  applyToolSize();
+  toolHighlighter.classList.add('active');
+  toolPen.classList.remove('active');
+  toolEraser.classList.remove('active');
+  toolShapeBtn.classList.remove('active');
+  penPopup.classList.add('hidden');
+  shapePopup.classList.add('hidden');
+  setPencilCursor();
+});
+
 colorSwatches.forEach(btn => {
   btn.addEventListener('click', () => {
+    if (currentTool === 'highlighter') hlColor = btn.dataset.color; else penColor = btn.dataset.color;
     strokeColor = btn.dataset.color;
     colorSwatches.forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
   });
 });
 
+// 도구를 바꿀 때 그 도구의 굵기·색으로 (형광펜은 펜과 따로 기억)
 function applyToolSize() {
-  strokeSize = currentTool === 'eraser' ? eraserSize : drawSize;
+  strokeSize = currentTool === 'eraser' ? eraserSize : currentTool === 'highlighter' ? hlSize : drawSize;
   sizeSlider.value = strokeSize;
   sizeDisplay.textContent = strokeSize;
+  if (currentTool === 'eraser') return;
+  strokeColor = currentTool === 'highlighter' ? hlColor : penColor;
+  colorSwatches.forEach(b => b.classList.toggle('active', b.dataset.color === strokeColor));
 }
 
 sizeSlider.addEventListener('input', e => {
   strokeSize = parseInt(e.target.value, 10);
-  if (currentTool === 'eraser') eraserSize = strokeSize; else drawSize = strokeSize;
+  if (currentTool === 'eraser') eraserSize = strokeSize;
+  else if (currentTool === 'highlighter') hlSize = strokeSize;
+  else drawSize = strokeSize;
   sizeDisplay.textContent = strokeSize;
   if (currentTool === 'eraser') setEraserCursor(strokeSize);
 });
@@ -1675,6 +1758,7 @@ async function applyRoomState({ files, pdfPage, strokes: serverStrokes }) {
   strokes = serverStrokes;
   myStroke = null;
   isDrawing = false;
+  liveIds.clear();
   pdfFiles = files || [];
   // 없어졌거나 바뀐 파일은 다시 받도록 버림
   for (const [id, cached] of pdfDocCache) {
@@ -1926,7 +2010,7 @@ async function renderPdfPage(pageNum) {
   const H = Math.floor(viewport.height);
 
   if (pdfRenderTask) pdfRenderTask.cancel();
-  [pdfCanvas, drawCanvas, previewCanvas].forEach(c => { c.width = W; c.height = H; });
+  [pdfCanvas, drawCanvas, previewCanvas, liveCanvas].forEach(c => { c.width = W; c.height = H; });
   canvasZoom = zoomLevel;
   canvasInner.style.width  = W + 'px';
   canvasInner.style.height = H + 'px';
