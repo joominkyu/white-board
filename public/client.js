@@ -958,8 +958,9 @@ remoteSpeakerSelect.addEventListener('change', () => {
 });
 
 function fillRemoteDeviceSelect(el, list, selectedId) {
-  el.innerHTML = list.map((d, i) =>
-    `<option value="${d.deviceId}" ${d.deviceId === selectedId ? 'selected' : ''}>${d.label || `장치 ${i + 1}`}</option>`
+  // 상대가 보낸 목록이라 그대로 넣으면 HTML·스크립트가 실행될 수 있음
+  el.innerHTML = (Array.isArray(list) ? list : []).map((d, i) =>
+    `<option value="${escHtml(String(d.deviceId))}" ${d.deviceId === selectedId ? 'selected' : ''}>${escHtml(String(d.label || `장치 ${i + 1}`))}</option>`
   ).join('');
 }
 

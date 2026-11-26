@@ -49,6 +49,10 @@ const REJOIN_GRACE_MS = 15 * 1000; // 연결이 끊겨도 이 시간 안에 다�
 // }
 const rooms = {};
 const BOARD_SAVE_INTERVAL_MS = 10 * 1000;
+// 봄노트 응답을 기다리는 최대 시간 (기본값은 5분이라 입장이 그만큼 멈출 수 있음). PDF는 크기가 커서 따로
+const BOMNOTE_TIMEOUT_MS = 15 * 1000;
+const BOMNOTE_PDF_TIMEOUT_MS = 60 * 1000;
+const LOAD_RETRY_DELAYS_MS = [1000, 3000]; // 불러오기 실패 시 다시 시도하기 전 대기 (총 3번 시도)
 
 // ── 봄노트 백엔드에 보고 ──
 function bomnoteUrl(path) {
@@ -61,7 +65,8 @@ async function notifyBomnote(path, body) {
     const res = await fetch(bomnoteUrl(path), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Live-Secret': LIVE_CLASS_SECRET },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(BOMNOTE_TIMEOUT_MS)
     });
     if (!res.ok) throw new Error(`status ${res.status}`);
   } catch (e) {
@@ -82,43 +87,56 @@ function flushUsage(roomId) {
 // ── 필기·PDF 저장/불러오기 (봄노트가 DB·R2에 보관) ──
 async function fetchBoard(roomId) {
   const res = await fetch(bomnoteUrl(`sessions/${encodeURIComponent(roomId)}/board`), {
-    headers: { 'X-Live-Secret': LIVE_CLASS_SECRET }
+    headers: { 'X-Live-Secret': LIVE_CLASS_SECRET },
+    signal: AbortSignal.timeout(BOMNOTE_TIMEOUT_MS)
   });
   if (!res.ok) throw new Error(`status ${res.status}`);
   return res.json(); // { board: { strokes } | null, pdfPage, files: [{ id, name, url }] }
 }
 
 async function downloadPdf(pdf) {
-  const res = await fetch(new URL(pdf.url, BOMNOTE_API_URL));
+  const res = await fetch(new URL(pdf.url, BOMNOTE_API_URL), { signal: AbortSignal.timeout(BOMNOTE_PDF_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`PDF status ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
 }
 
 async function loadRoomState(roomId, room) {
   if (!BOMNOTE_API_URL) return;
-  try {
-    const data = await fetchBoard(roomId);
-    room.strokes = data.board?.strokes ?? [];
-    room.pageKey = data.pdfPage ?? 0;
-    room.notifyEnabled = !!data.notifyEnabled;
-    const files = await Promise.all((data.files ?? []).map(async (f) => {
-      try { return { id: f.id, name: f.name, buffer: await downloadPdf(f), version: Date.now() }; }
-      catch (e) { console.error(`PDF 불러오기 실패 (room ${roomId}, file ${f.id}):`, e.message); return null; }
-    }));
-    room.files = files.filter(Boolean);
-  } catch (e) {
-    console.error(`필기 불러오기 실패 (room ${roomId}):`, e.message);
+  let data;
+  for (let attempt = 0; ; attempt++) {
+    try { data = await fetchBoard(roomId); break; }
+    catch (e) {
+      console.error(`필기 불러오기 실패 (room ${roomId}, ${attempt + 1}번째):`, e.message);
+      if (attempt >= LOAD_RETRY_DELAYS_MS.length) {
+        // 저장된 필기·PDF를 모르는 채로 저장하면 지난 기록을 빈 보드로 덮어쓰게 되므로, 이 방은 봄노트에 저장하지 않음.
+        // 수업은 빈 보드로 진행하고, 모두 나가 방이 지워지면 다음 입장 때 다시 불러옴
+        room.loadFailed = true;
+        return;
+      }
+      await new Promise(r => setTimeout(r, LOAD_RETRY_DELAYS_MS[attempt]));
+    }
   }
+  room.strokes = data.board?.strokes ?? [];
+  room.pageKey = data.pdfPage ?? 0;
+  room.notifyEnabled = !!data.notifyEnabled;
+  // 내려받지 못한 PDF도 번호는 기억 — 새 PDF가 같은 번호를 쓰면 봄노트에 보관된 원래 PDF를 덮어씀
+  room.maxFileId = Math.max(0, ...(data.files ?? []).map(f => f.id));
+  const files = await Promise.all((data.files ?? []).map(async (f) => {
+    try { return { id: f.id, name: f.name, buffer: await downloadPdf(f), version: Date.now() }; }
+    catch (e) { console.error(`PDF 불러오기 실패 (room ${roomId}, file ${f.id}):`, e.message); return null; }
+  }));
+  room.files = files.filter(Boolean);
 }
 
 async function saveBoard(roomId, room) {
-  if (!BOMNOTE_API_URL) return;
+  if (!BOMNOTE_API_URL || room.loadFailed) return;
   room.dirty = false;
   try {
     const res = await fetch(bomnoteUrl(`sessions/${encodeURIComponent(roomId)}/board`), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'X-Live-Secret': LIVE_CLASS_SECRET },
-      body: JSON.stringify({ strokes: room.strokes, pdfPage: room.pageKey })
+      body: JSON.stringify({ strokes: room.strokes, pdfPage: room.pageKey }),
+      signal: AbortSignal.timeout(BOMNOTE_TIMEOUT_MS)
     });
     if (!res.ok) throw new Error(`status ${res.status}`);
   } catch (e) {
@@ -129,7 +147,7 @@ async function saveBoard(roomId, room) {
 
 function getOrCreateRoom(roomId) {
   if (!rooms[roomId]) {
-    const room = { users: [], host: null, files: [], pageKey: 0, strokes: [], pairedSince: null, relayUsed: false, dirty: false };
+    const room = { users: [], host: null, files: [], maxFileId: 0, pageKey: 0, strokes: [], pairedSince: null, relayUsed: false, dirty: false, loadFailed: false };
     room.ready = loadRoomState(roomId, room);
     rooms[roomId] = room;
   }
@@ -140,7 +158,7 @@ const markDirty = (room) => { room.dirty = true; };
 
 // 봄노트에 PDF 저장·삭제 — 올리고 바로 지워도 순서가 뒤바뀌지 않게 방마다 차례로
 function queueBomnote(roomId, room, label, makeRequest) {
-  if (!BOMNOTE_API_URL) return;
+  if (!BOMNOTE_API_URL || room.loadFailed) return; // 보관된 PDF 목록을 모르면 번호가 겹쳐 원래 PDF를 덮어쓸 수 있음
   room.pdfQueue = (room.pdfQueue || Promise.resolve())
     .then(() => makeRequest())
     .then(r => { if (!r.ok) throw new Error(`status ${r.status}`); })
@@ -229,15 +247,19 @@ function removeUser(roomId, socketId) {
 
   io.to(roomId).except(socketId).emit('user-left', { socketId, username: user.username });
 
-  if (room.users.length === 0) {
-    room.expireTimer = setTimeout(async () => {
-      if (rooms[roomId] !== room || room.users.length > 0) return;
-      if (room.dirty) await saveBoard(roomId, room);
-      if (rooms[roomId] !== room || room.users.length > 0) return; // 저장하는 사이 다시 입장함
-      delete rooms[roomId];
-      notifyBomnote('end', { sessionId: roomId }); // 학생 [수업 입장] 배너 숨김
-    }, ROOM_EXPIRE_MS);
-  }
+  if (room.users.length === 0) scheduleRoomExpire(roomId, room);
+}
+
+function scheduleRoomExpire(roomId, room) {
+  room.expireTimer = setTimeout(async () => {
+    if (rooms[roomId] !== room || room.users.length > 0) return;
+    if (room.dirty) await saveBoard(roomId, room);
+    if (rooms[roomId] !== room || room.users.length > 0) return; // 저장하는 사이 다시 입장함
+    // 저장에 실패했으면 지우지 않고 다음에 다시 시도 (지우면 저장 안 된 필기가 사라짐)
+    if (room.dirty && !room.loadFailed) { scheduleRoomExpire(roomId, room); return; }
+    delete rooms[roomId];
+    notifyBomnote('end', { sessionId: roomId }); // 학생 [수업 입장] 배너 숨김
+  }, ROOM_EXPIRE_MS);
 }
 
 // ── PDF 업로드/다운로드 ──
@@ -254,7 +276,8 @@ app.post('/rooms/:roomId/pdf', express.raw({ type: 'application/pdf', limit: MAX
   try { name = decodeURIComponent(req.get('X-File-Name') || name).slice(0, 200); } catch (_) {}
 
   // 기존 파일은 그대로 두고 목록에 추가, 올린 파일 1쪽으로 이동
-  const id = Math.max(0, ...room.files.map(f => f.id)) + 1;
+  const id = Math.max(room.maxFileId, ...room.files.map(f => f.id)) + 1;
+  room.maxFileId = id;
   const file = { id, name, buffer: req.body, version: Date.now() };
   room.files.push(file);
   room.pageKey = id * PAGE_KEY_BASE + 1;
@@ -269,7 +292,8 @@ app.post('/rooms/:roomId/pdf', express.raw({ type: 'application/pdf', limit: MAX
       'Content-Type': 'application/pdf', 'X-Live-Secret': LIVE_CLASS_SECRET,
       'X-File-Name': encodeURIComponent(name), 'X-File-Id': String(id)
     },
-    body: req.body
+    body: req.body,
+    signal: AbortSignal.timeout(BOMNOTE_PDF_TIMEOUT_MS)
   }));
 });
 
@@ -300,8 +324,8 @@ app.get('/review/state', async (req, res) => {
   try {
     // 수업이 진행 중이면 메모리의 최신 상태, 아니면 봄노트에 저장된 상태
     const room = rooms[roomId];
-    if (room) {
-      await room.ready;
+    if (room) await room.ready;
+    if (room && !room.loadFailed) { // 불러오기에 실패한 방의 메모리 상태는 저장본과 다르므로 저장본을 보여줌
       return res.json({ strokes: room.strokes, pdfPage: room.pageKey, files: room.files.map(f => ({ id: f.id, name: f.name })) });
     }
     const data = await fetchBoard(roomId);
@@ -322,7 +346,7 @@ app.get('/review/pdf/:fileId', async (req, res) => {
   try {
     const room = rooms[roomId];
     if (room) await room.ready;
-    const live = room?.files.find(f => f.id === fileId);
+    const live = room && !room.loadFailed ? room.files.find(f => f.id === fileId) : null;
     if (live) return res.type('application/pdf').send(live.buffer);
     const data = await fetchBoard(roomId);
     const saved = (data.files ?? []).find(f => f.id === fileId);
@@ -363,7 +387,8 @@ async function getIceServers() {
     const res = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${keyId}/credentials/generate-ice-servers`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ttl: 86400 })
+      body: JSON.stringify({ ttl: 86400 }),
+      signal: AbortSignal.timeout(BOMNOTE_TIMEOUT_MS)
     });
     if (!res.ok) throw new Error(`status ${res.status}`);
     const { iceServers } = await res.json();
@@ -399,7 +424,11 @@ io.on('connection', (socket) => {
     const room = getOrCreateRoom(roomId);
     clearTimeout(room.expireTimer);
     await room.ready; // 저장된 필기·PDF 불러오기 (서버 재시작 후 첫 입장)
-    if (!socket.connected) return;
+    if (!socket.connected) {
+      // 불러오는 사이 창을 닫음 — 아무도 없는 방이 만료 타이머 없이 남지 않게
+      if (rooms[roomId] === room && room.users.length === 0) { clearTimeout(room.expireTimer); scheduleRoomExpire(roomId, room); }
+      return;
+    }
 
     // 재접속·새 탭: 같은 사람의 이전 연결이 남아 있으면 조용히 교체 (상대에게 "나갔습니다"를 띄우지 않고 사용 시간도 이어서 계산)
     const stale = room.users.find(u => u.uid === uid && u.socketId !== socket.id);
@@ -666,7 +695,8 @@ io.on('connection', (socket) => {
     markDirty(room);
     socket.to(roomId).emit('pdf-deleted', { id: fileId, pageKey: room.pageKey });
     queueBomnote(roomId, room, 'PDF 삭제', () => fetch(bomnoteUrl(`sessions/${encodeURIComponent(roomId)}/pdf/${fileId}`), {
-      method: 'DELETE', headers: { 'X-Live-Secret': LIVE_CLASS_SECRET }
+      method: 'DELETE', headers: { 'X-Live-Secret': LIVE_CLASS_SECRET },
+      signal: AbortSignal.timeout(BOMNOTE_TIMEOUT_MS)
     }));
   });
 
