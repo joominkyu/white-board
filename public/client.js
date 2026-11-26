@@ -41,6 +41,10 @@ function uid() {
 // ── 상태 ──
 let socket, localStream, peerConnection;
 let myUsername = '', myRoomId = '', remoteSocketId = '';
+// 이 창의 임의 값 / 상대 창의 값 — 서버가 재시작돼도 상대가 같은 창으로 다시 들어온 것인지 구분 (영상 연결 유지)
+const myTabId = uid();
+let remoteTabId = null;
+let boardFullMsgAt = 0; // 필기 한도 안내를 마지막으로 띄운 시각 (계속 쓰는 동안 반복해서 띄우지 않게)
 let hasJoined = false;
 let inRoom = false;          // 수업방에 들어가 있어 필기를 바로 보낼 수 있음
 let disconnectedAt = 0;      // 마지막으로 서버 연결이 끊긴 시각
@@ -97,6 +101,8 @@ let zoomHideTimer = null;
 let pdfBaseScale = 1;
 let zoomRenderTimer = null;
 let canvasZoom = 1; // 캔버스 해상도에 반영된 줌 (PDF는 줌 배율로 다시 렌더링, 빈 보드는 1)
+// PDF 캔버스 한 장의 최대 픽셀 수 — 구형 iOS 캔버스 한도(4096×4096 ≈ 1677만) 아래. 4장이면 약 256MB
+const MAX_CANVAS_PIXELS = 16_000_000;
 
 // 녹화 상태
 let mediaRecorder = null, recordChunks = [], recordTimer = null;
@@ -289,7 +295,7 @@ async function initApp() {
   setupSocketEvents();
   // 최초 연결과 재연결 모두 방에 (다시) 입장
   socket.on('connect', () => {
-    socket.emit('join-room', { token: liveToken });
+    socket.emit('join-room', { token: liveToken, tabId: myTabId });
   });
 
   lobby.classList.add('hidden');
@@ -324,6 +330,7 @@ function setupSocketEvents() {
     const others = users.filter(u => u.socketId !== socket.id);
     if (others.length > 0) {
       remoteSocketId = others[0].socketId;
+      remoteTabId = others[0].tabId || null;
       remoteLabel.textContent = others[0].username;
     }
     updateNotifyButton();
@@ -370,11 +377,17 @@ function setupSocketEvents() {
   });
 
   // 상대방이 나중에 들어옴 → 내가 offer를 보냄 (보드 상태는 서버가 직접 전달)
-  socket.on('user-joined', async ({ socketId, username, rejoined }) => {
+  socket.on('user-joined', async ({ socketId, username, rejoined, tabId }) => {
+    // 같은 창이 다시 들어옴 — 서버가 재시작되면 서버는 rejoined를 모르므로 창 값으로도 확인
+    const sameTab = !!tabId && tabId === remoteTabId;
     remoteSocketId = socketId;
+    remoteTabId = tabId || null;
     updateNotifyButton();
     remoteLabel.textContent = username;
-    if (!rejoined) showSystemMsg(`${username}님이 입장했습니다.`); // 잠깐 끊겼다 돌아온 경우는 영상만 다시 연결
+    if (!rejoined && !sameTab) showSystemMsg(`${username}님이 입장했습니다.`);
+    // 같은 창이고 영상이 아직 연결돼 있으면 그대로 둠 (영상은 서버를 거치지 않아 서버 재시작·잠깐 끊김에도 살아 있음).
+    // 새로 걸면 멀쩡한 영상이 끊김. 다른 창(새 탭·새로고침)이면 그 창에는 연결이 없으므로 새로 연결
+    if (sameTab && peerConnection && peerConnection.connectionState === 'connected' && peerConnection.signalingState === 'stable') return;
     await startCall();
   });
 
@@ -417,6 +430,7 @@ function setupSocketEvents() {
     statusBadge.textContent = '대기 중';
     statusBadge.className = 'status-badge waiting';
     remoteSocketId = '';
+    remoteTabId = null; // 나갔다 다시 들어오면 "입장했습니다"를 다시 띄움
     if (peerConnection) { peerConnection.close(); peerConnection = null; }
     updateNotifyButton();
     remoteRecBanner.classList.add('hidden');
@@ -468,6 +482,14 @@ function setupSocketEvents() {
   socket.on('stroke-removed', (id) => {
     strokes = strokes.filter(s => s.id !== id);
     redrawBoard();
+  });
+  // 서버 필기 한도 — strokes: 방 전체 획 수, points: 한 획 점 수 (넘는 부분은 상대 화면·저장본에 남지 않음)
+  socket.on('board-full', ({ reason } = {}) => {
+    if (Date.now() - boardFullMsgAt < 30 * 1000) return;
+    boardFullMsgAt = Date.now();
+    showSystemMsg(reason === 'points'
+      ? '한 번에 너무 길게 써서 끝부분이 저장되지 않았어요. 펜을 뗐다가 이어서 써 주세요.'
+      : '필기가 너무 많아 더 저장할 수 없어요. 안 쓰는 쪽을 지운 뒤 다시 써 주세요.');
   });
   socket.on('board-cleared', (page) => {
     strokes = strokes.filter(s => s.page !== page);
@@ -1180,7 +1202,8 @@ function currentPageKey() {
   return pdfDoc ? pdfFileId * PAGE_KEY_BASE + pdfCurrentPage : 0;
 }
 
-const toNorm = (x, y) => [x / drawCanvas.width, y / drawCanvas.height];
+// 소수 4자리 (캔버스 1만분의 1) — 캔버스는 최대 1600만 픽셀(A4 약 3360×4750)이라 오차 0.25px 이하. 예전엔 반올림 없이 보내 점당 40바이트 넘음
+const toNorm = (x, y) => [Math.round(x / drawCanvas.width * 10000) / 10000, Math.round(y / drawCanvas.height * 10000) / 10000];
 const toPx = ([x, y]) => [x * drawCanvas.width, y * drawCanvas.height];
 // 슬라이더 굵기(줌 100% 기준 px) → 캔버스 너비 대비 비율
 const normSize = () => strokeSize * canvasZoom / drawCanvas.width;
@@ -1201,16 +1224,23 @@ function drawStroke(ctx, s, W = drawCanvas.width, H = drawCanvas.height) {
     return;
   }
   setupCtx(ctx, s.tool, s.color, size);
-  // 필압이 있는 펜 획은 구간마다 굵기를 바꿔 그림
+  // 필압이 있는 펜 획은 구간마다 굵기를 바꿔 그림. 굵기가 같은 연속 구간은 한 path로 묶어 한 번에 그림
+  // (점마다 stroke()를 부르면 되돌리기·쪽 이동 때 전체 다시 그리기가 느림. 둥근 이음이라 모양은 같음)
   if (s.points[0].length > 2) {
+    let width = null;
     for (let i = 0; i < pts.length; i++) {
       const j = Math.max(0, i - 1);
-      ctx.lineWidth = size * pressureScale((s.points[j][2] + s.points[i][2]) / 2);
-      ctx.beginPath();
-      ctx.moveTo(pts[j][0], pts[j][1]);
+      const w = size * pressureScale((s.points[j][2] + s.points[i][2]) / 2);
+      if (w !== width) {
+        if (width !== null) ctx.stroke();
+        width = w;
+        ctx.lineWidth = w;
+        ctx.beginPath();
+        ctx.moveTo(pts[j][0], pts[j][1]);
+      }
       ctx.lineTo(pts[i][0], pts[i][1]);
-      ctx.stroke();
     }
+    ctx.stroke();
     return;
   }
   ctx.beginPath();
@@ -2004,20 +2034,24 @@ async function renderPdfPage(pageNum) {
   // 처음엔 화면 폭에 맞춤 (세로로 긴 페이지는 위아래로 스크롤) — 예전엔 페이지 전체가 보이게 맞춰서 너무 작았음.
   // 세로 스크롤바 자리만큼 빼서 가로 스크롤이 생기지 않게, 최대 2배 (확대 시 캔버스가 너무 커지지 않게)
   pdfBaseScale = Math.min((containerW - 20) / viewport0.width, 2);
-  // 현재 줌 배율을 반영해 렌더링 → 확대해도 선명함
-  const viewport = page.getViewport({ scale: pdfBaseScale * zoomLevel });
+  // 현재 줌 배율을 반영해 렌더링 → 확대해도 선명함. 단 캔버스 한 장이 MAX_CANVAS_PIXELS를 넘으면 그 배율까지만 그리고
+  // 나머지는 CSS로 확대 (같은 크기 캔버스 4장이라 iPad에서 메모리 한도를 넘어 캔버스가 비는 일 방지)
+  const fitZoom = Math.sqrt(MAX_CANVAS_PIXELS / (viewport0.width * viewport0.height)) / pdfBaseScale;
+  const renderZoom = Math.min(zoomLevel, fitZoom);
+  const viewport = page.getViewport({ scale: pdfBaseScale * renderZoom });
 
   const W = Math.floor(viewport.width);
   const H = Math.floor(viewport.height);
 
   if (pdfRenderTask) pdfRenderTask.cancel();
   [pdfCanvas, drawCanvas, previewCanvas, liveCanvas].forEach(c => { c.width = W; c.height = H; });
-  canvasZoom = zoomLevel;
+  canvasZoom = renderZoom;
+  const cssScale = zoomLevel / canvasZoom; // 상한에 안 걸리면 1 (캔버스 자체가 줌 반영)
   canvasInner.style.width  = W + 'px';
   canvasInner.style.height = H + 'px';
-  canvasInner.style.transform = 'scale(1)'; // CSS 스케일 불필요 — 캔버스 자체가 줌 반영
-  canvasWrapper.style.width  = W + 'px';
-  canvasWrapper.style.height = H + 'px';
+  canvasInner.style.transform = `scale(${cssScale})`;
+  canvasWrapper.style.width  = Math.ceil(W * cssScale) + 'px';
+  canvasWrapper.style.height = Math.ceil(H * cssScale) + 'px';
   if (currentTool === 'eraser') setEraserCursor(strokeSize);
 
   // 필기는 획 데이터로 다시 그림 → 페이지를 오가거나 확대해도 유지되고 선명함

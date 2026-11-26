@@ -44,7 +44,8 @@ const REJOIN_GRACE_MS = 15 * 1000; // 연결이 끊겨도 이 시간 안에 다�
 //     files: [{ id, buffer, name, version }] (PDF 최대 10개), pageKey: 보고 있는 위치, strokes: [], expireTimer,
 //     pdfQueue: 봄노트에 PDF 저장·삭제를 순서대로 보내는 Promise,
 //     pairedSince: 두 사람이 모두 접속한 시각(ms) | null, relayUsed: TURN 경유 여부,
-//     ready: 봄노트에서 저장된 필기를 불러오는 Promise, dirty: 저장 안 된 변경 있음
+//     ready: 봄노트에서 저장된 필기를 불러오는 Promise, dirty: 저장 안 된 변경 있음,
+//     saving: 진행 중인 필기 저장 Promise | null, unreportedSeconds: 못 보낸 사용 시간, tooLarge·saveRetryAt: 413 뒤 다시 시도할 시각
 //   }
 // }
 const rooms = {};
@@ -59,8 +60,12 @@ function bomnoteUrl(path) {
   return `${BOMNOTE_API_URL}/api/live/internal/${path}`;
 }
 
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const RETRY_DELAYS_MS = [2000, 5000]; // 봄노트 보고·PDF 보관 실패 시 다시 시도하기 전 대기 (총 3번)
+
+// 결과: 'ok' | 'failed' (처리 안 된 게 확실 — 연결 실패·5xx) | 'unknown' (타임아웃이라 처리됐을 수도 있음, 또는 4xx)
 async function notifyBomnote(path, body) {
-  if (!BOMNOTE_API_URL) return;
+  if (!BOMNOTE_API_URL) return 'ok';
   try {
     const res = await fetch(bomnoteUrl(path), {
       method: 'POST',
@@ -68,20 +73,38 @@ async function notifyBomnote(path, body) {
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(BOMNOTE_TIMEOUT_MS)
     });
-    if (!res.ok) throw new Error(`status ${res.status}`);
+    if (res.ok) return 'ok';
+    console.error(`봄노트 보고 실패 (${path}, ${JSON.stringify(body)}): status ${res.status}`);
+    return res.status >= 500 ? 'failed' : 'unknown';
   } catch (e) {
     console.error(`봄노트 보고 실패 (${path}, ${JSON.stringify(body)}):`, e.message);
+    return e.name === 'TimeoutError' ? 'unknown' : 'failed';
   }
 }
 
-// 사용 시간 — 두 사람이 모두 접속해 있던 시간만
+// 수업 종료 — 여러 번 보내도 결과가 같으므로 실패하면 다시 시도
+async function notifyEnd(roomId) {
+  for (let attempt = 0; ; attempt++) {
+    if (await notifyBomnote('end', { sessionId: roomId }) === 'ok' || attempt >= RETRY_DELAYS_MS.length) return;
+    await sleep(RETRY_DELAYS_MS[attempt]);
+  }
+}
+
+// 사용 시간 — 두 사람이 모두 접속해 있던 시간만. 봄노트는 받은 초를 더하므로, 처리 안 된 게 확실할 때만
+// 다음 보고에 합쳐 다시 보냄 (타임아웃은 이미 더해졌을 수 있어 다시 보내지 않음 — 두 번 더해지는 것 방지)
 function flushUsage(roomId) {
   const room = rooms[roomId];
-  if (!room || !room.pairedSince) return;
-  const seconds = Math.floor((Date.now() - room.pairedSince) / 1000);
+  if (!room) return;
+  if (room.pairedSince) {
+    const elapsed = Math.floor((Date.now() - room.pairedSince) / 1000);
+    room.pairedSince += elapsed * 1000;
+    room.unreportedSeconds += elapsed;
+  }
+  const seconds = Math.min(room.unreportedSeconds, 3600); // 봄노트가 한 번에 받는 최대값
   if (seconds <= 0) return;
-  room.pairedSince += seconds * 1000;
-  return notifyBomnote('usage', { sessionId: roomId, seconds, relay: room.relayUsed });
+  room.unreportedSeconds -= seconds;
+  return notifyBomnote('usage', { sessionId: roomId, seconds, relay: room.relayUsed })
+    .then(result => { if (result === 'failed') room.unreportedSeconds += seconds; });
 }
 
 // ── 필기·PDF 저장/불러오기 (봄노트가 DB·R2에 보관) ──
@@ -128,26 +151,51 @@ async function loadRoomState(roomId, room) {
   room.files = files.filter(Boolean);
 }
 
-async function saveBoard(roomId, room) {
-  if (!BOMNOTE_API_URL || room.loadFailed) return;
+const TOO_LARGE_RETRY_MS = 5 * 60 * 1000; // 보드가 봄노트 한도(20MB)를 넘으면 10초마다가 아니라 5분마다만 다시 시도
+
+async function putBoard(roomId, room) {
   room.dirty = false;
+  const body = JSON.stringify({ strokes: room.strokes, pdfPage: room.pageKey });
   try {
     const res = await fetch(bomnoteUrl(`sessions/${encodeURIComponent(roomId)}/board`), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'X-Live-Secret': LIVE_CLASS_SECRET },
-      body: JSON.stringify({ strokes: room.strokes, pdfPage: room.pageKey }),
+      body,
       signal: AbortSignal.timeout(BOMNOTE_TIMEOUT_MS)
     });
+    if (res.status === 413) {
+      room.dirty = true;
+      room.saveRetryAt = Date.now() + TOO_LARGE_RETRY_MS;
+      // 같은 방에서는 처음 한 번만 남김 (5분마다 같은 로그가 쌓이지 않게)
+      if (!room.tooLarge) console.error(`필기 저장 실패 (room ${roomId}): 보드가 너무 큼 (status 413, ${(Buffer.byteLength(body) / 1024 / 1024).toFixed(1)}MB, 획 ${room.strokes.length}개)`);
+      room.tooLarge = true;
+      return;
+    }
     if (!res.ok) throw new Error(`status ${res.status}`);
+    room.tooLarge = false;
   } catch (e) {
     room.dirty = true; // 다음 주기에 다시 시도
     console.error(`필기 저장 실패 (room ${roomId}):`, e.message);
   }
 }
 
+// 방마다 한 번에 하나만 보냄 — 응답이 늦을 때 다음 주기 요청이 겹쳐 나가 오래된 필기가 나중에 저장되는 일 방지.
+// 진행 중이면 새로 보내지 않고 그 요청을 기다림 (바뀐 것은 dirty로 남아 다음 주기에 저장)
+function saveBoard(roomId, room) {
+  if (!BOMNOTE_API_URL || room.loadFailed) return;
+  if (!room.saving) room.saving = putBoard(roomId, room).finally(() => { room.saving = null; });
+  return room.saving;
+}
+
+// 진행 중인 저장이 끝난 뒤 그 사이 바뀐 최신 상태까지 저장 (방 만료·서버 종료 때)
+async function flushBoard(roomId, room) {
+  await room.saving;
+  if (room.dirty) await saveBoard(roomId, room);
+}
+
 function getOrCreateRoom(roomId) {
   if (!rooms[roomId]) {
-    const room = { users: [], host: null, files: [], maxFileId: 0, pageKey: 0, strokes: [], pairedSince: null, relayUsed: false, dirty: false, loadFailed: false };
+    const room = { users: [], host: null, files: [], maxFileId: 0, pageKey: 0, strokes: [], pairedSince: null, unreportedSeconds: 0, relayUsed: false, dirty: false, loadFailed: false };
     room.ready = loadRoomState(roomId, room);
     rooms[roomId] = room;
   }
@@ -159,10 +207,20 @@ const markDirty = (room) => { room.dirty = true; };
 // 봄노트에 PDF 저장·삭제 — 올리고 바로 지워도 순서가 뒤바뀌지 않게 방마다 차례로
 function queueBomnote(roomId, room, label, makeRequest) {
   if (!BOMNOTE_API_URL || room.loadFailed) return; // 보관된 PDF 목록을 모르면 번호가 겹쳐 원래 PDF를 덮어쓸 수 있음
-  room.pdfQueue = (room.pdfQueue || Promise.resolve())
-    .then(() => makeRequest())
-    .then(r => { if (!r.ok) throw new Error(`status ${r.status}`); })
-    .catch(e => console.error(`${label} 실패 (room ${roomId}):`, e.message));
+  room.pdfQueue = (room.pdfQueue || Promise.resolve()).then(async () => {
+    // 같은 번호로 다시 보내면 봄노트가 바꿔 저장·삭제하므로 다시 시도해도 안전. 4xx는 다시 보내도 같으므로 그만
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const r = await makeRequest();
+        if (r.ok) return;
+        throw Object.assign(new Error(`status ${r.status}`), { status: r.status });
+      } catch (e) {
+        console.error(`${label} 실패 (room ${roomId}, ${attempt + 1}번째):`, e.message);
+        if (e.status < 500 || attempt >= RETRY_DELAYS_MS.length) return;
+      }
+      await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+  });
 }
 
 const fileMeta = (f) => ({ id: f.id, name: f.name, version: f.version });
@@ -172,14 +230,19 @@ const isValidPageKey = (room, key) =>
   key === 0 || (Number.isInteger(key) && key % PAGE_KEY_BASE >= 1 && room.files.some(f => f.id === fileOfKey(key)));
 
 setInterval(() => {
-  for (const [roomId, room] of Object.entries(rooms)) if (room.dirty) saveBoard(roomId, room);
+  for (const [roomId, room] of Object.entries(rooms)) {
+    if (room.dirty && !room.saving && !(room.saveRetryAt > Date.now())) saveBoard(roomId, room);
+  }
 }, BOARD_SAVE_INTERVAL_MS);
 
-// 재배포·재시작 시 (Railway는 SIGTERM) 저장 안 된 필기와 사용 시간을 보내고 종료
+// 재배포·재시작 시 (Railway는 SIGTERM) 저장 안 된 필기·사용 시간·PDF 보관 대기열을 보내고 종료.
+// Railway는 SIGTERM 뒤 30초(RAILWAY_DEPLOYMENT_DRAINING_SECONDS) 기다려 주므로 최대 25초까지만 기다림
+const SHUTDOWN_WAIT_MS = 25 * 1000;
 process.on('SIGTERM', async () => {
-  await Promise.all(Object.entries(rooms).map(([roomId, room]) =>
-    Promise.all([flushUsage(roomId), room.dirty ? saveBoard(roomId, room) : null])
+  const all = Promise.all(Object.entries(rooms).map(([roomId, room]) =>
+    Promise.all([flushUsage(roomId), flushBoard(roomId, room), room.pdfQueue])
   ));
+  await Promise.race([all, sleep(SHUTDOWN_WAIT_MS)]);
   process.exit(0);
 });
 
@@ -192,9 +255,12 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 function cleanPoints(points, max) {
   if (!Array.isArray(points) || points.length === 0 || points.length > max) return null;
   if (!points.every(p => Array.isArray(p) && isNum(p[0]) && isNum(p[1]))) return null;
-  // 세 번째 값은 펜 필압(0~1, 있을 때만)
-  return points.map(p => (isNum(p[2]) ? [p[0], p[1], Math.min(1, Math.max(0, p[2]))] : [p[0], p[1]]));
+  // 세 번째 값은 펜 필압(0~1, 있을 때만). 좌표는 소수 4자리, 필압은 2자리로 반올림 (예전 클라이언트가 보낸 긴 소수도 줄여 저장)
+  return points.map(p => (isNum(p[2])
+    ? [roundCoord(p[0]), roundCoord(p[1]), Math.round(Math.min(1, Math.max(0, p[2])) * 100) / 100]
+    : [roundCoord(p[0]), roundCoord(p[1])]));
 }
+const roundCoord = (v) => Math.round(v * 10000) / 10000;
 
 function cleanStroke(s, owner) {
   if (!s || !isStr(s.id, 64)) return null;
@@ -253,12 +319,14 @@ function removeUser(roomId, socketId) {
 function scheduleRoomExpire(roomId, room) {
   room.expireTimer = setTimeout(async () => {
     if (rooms[roomId] !== room || room.users.length > 0) return;
-    if (room.dirty) await saveBoard(roomId, room);
+    await Promise.all([flushBoard(roomId, room), flushUsage(roomId)]); // 진행 중 저장이 끝난 뒤 최신 상태, 못 보낸 사용 시간
     if (rooms[roomId] !== room || room.users.length > 0) return; // 저장하는 사이 다시 입장함
-    // 저장에 실패했으면 지우지 않고 다음에 다시 시도 (지우면 저장 안 된 필기가 사라짐)
-    if (room.dirty && !room.loadFailed) { scheduleRoomExpire(roomId, room); return; }
+    // 저장에 실패했으면 지우지 않고 다음에 다시 시도 (지우면 저장 안 된 필기가 사라짐).
+    // 단 봄노트 한도를 넘는 보드(413)는 다시 해도 저장되지 않으므로 지움 — 안 지우면 방이 메모리에 계속 남고 수업 종료도 안 됨
+    if (room.dirty && !room.loadFailed && !room.tooLarge) { scheduleRoomExpire(roomId, room); return; }
+    if (room.dirty && room.tooLarge) console.error(`필기 저장 포기 (room ${roomId}): 보드가 봄노트 한도를 넘어 마지막 저장 이후 필기는 남지 않음`);
     delete rooms[roomId];
-    notifyBomnote('end', { sessionId: roomId }); // 학생 [수업 입장] 배너 숨김
+    notifyEnd(roomId); // 학생 [수업 입장] 배너 숨김
   }, ROOM_EXPIRE_MS);
 }
 
@@ -407,7 +475,8 @@ io.on('connection', (socket) => {
   console.log('connected:', socket.id);
 
   // 봄노트가 발급한 입장 토큰으로만 입장 — { sid: 수업 ID, uid, name, role: 'teacher'|'student' }
-  socket.on('join-room', async ({ token } = {}) => {
+  // tabId: 창(페이지)마다 만든 임의 값 — 서버가 재시작돼 방 기록이 없어도 상대가 같은 창으로 다시 들어온 것인지 알 수 있게
+  socket.on('join-room', async ({ token, tabId } = {}) => {
     let claims;
     try {
       claims = jwt.verify(token, LIVE_CLASS_SECRET);
@@ -420,6 +489,7 @@ io.on('connection', (socket) => {
     const username = String(claims.name).slice(0, 20);
     if (claims.role === 'review') { socket.emit('auth-failed'); return; } // 보기 전용 토큰으로는 수업 입장 불가
     const role = claims.role === 'teacher' ? 'teacher' : 'student';
+    const tab = isStr(tabId, 64) ? tabId : null;
 
     const room = getOrCreateRoom(roomId);
     clearTimeout(room.expireTimer);
@@ -446,19 +516,19 @@ io.on('connection', (socket) => {
     }
 
     if (role === 'teacher') room.host = socket.id;
-    room.users.push({ socketId: socket.id, username, uid, role });
+    room.users.push({ socketId: socket.id, username, uid, role, tabId: tab });
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.username = username;
     socket.data.clientId = uid; // 획 주인 식별 (재접속해도 같은 사람)
     if (room.users.length === 2 && !room.pairedSince) room.pairedSince = Date.now();
 
-    socket.to(roomId).emit('user-joined', { socketId: socket.id, username, rejoined: !!stale });
+    socket.to(roomId).emit('user-joined', { socketId: socket.id, username, rejoined: !!stale, tabId: tab });
 
     socket.emit('joined', {
       roomId,
       me: uid,
-      users: room.users.map(u => ({ socketId: u.socketId, username: u.username })),
+      users: room.users.map(u => ({ socketId: u.socketId, username: u.username, tabId: u.tabId })),
       isHost: room.host === socket.id,
       canNotify: room.host === socket.id && !!room.notifyEnabled, // 선생님만, 봄노트에 알림톡 템플릿이 있을 때만
       canNote: room.host === socket.id && !!BOMNOTE_API_URL, // 선생님만, [나가기] 때 수업 기록 창
@@ -520,7 +590,9 @@ io.on('connection', (socket) => {
   // ── 화이트보드: 획 단위 동기화 ──
   socket.on('stroke-start', (data) => {
     const room = rooms[socket.data.roomId];
-    if (!room || room.strokes.length >= MAX_STROKES_PER_ROOM) return;
+    if (!room) return;
+    // 한도가 차면 버리는 대신 쓴 사람에게 알림 (그 획은 상대 화면·저장본에 남지 않음)
+    if (room.strokes.length >= MAX_STROKES_PER_ROOM) { socket.emit('board-full', { reason: 'strokes' }); return; }
     const stroke = cleanStroke(data, socket.data.clientId);
     if (!stroke || room.strokes.some(s => s.id === stroke.id)) return;
     room.strokes.push(stroke);
@@ -533,7 +605,11 @@ io.on('connection', (socket) => {
     if (!room) return;
     const stroke = room.strokes.findLast(s => s.id === id);
     if (!stroke || stroke.owner !== socket.data.clientId) return;
-    const clean = cleanPoints(points, MAX_POINTS_PER_STROKE - stroke.points.length);
+    // 한 획 점 한도를 넘는 부분은 잘라서 받고 쓴 사람에게 알림 (예전에는 넘는 묶음 전체를 조용히 버림)
+    const left = MAX_POINTS_PER_STROKE - stroke.points.length;
+    const cut = Array.isArray(points) && points.length > left;
+    const clean = left > 0 ? cleanPoints(cut ? points.slice(0, left) : points, left) : null;
+    if (cut) socket.emit('board-full', { reason: 'points' });
     if (!clean) return;
     stroke.points.push(...clean);
     markDirty(room);
